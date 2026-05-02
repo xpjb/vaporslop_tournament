@@ -4,6 +4,11 @@ import { playBattle } from "/render.js";
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+const PLAYER_ID_KEY = "playerUuid";
+const NICKNAME_KEY = "playerNickname";
+const RUN_ID_KEY = "runId";
+const LB_PAGE_SIZE = 10;
+
 const state = {
   ws: null,
   defs: { characters: [], items: [] },
@@ -12,7 +17,29 @@ const state = {
   pendingItem: null, // shop item slot waiting for team target
   lastBattle: null,
   battleAnimating: false,
+  playerId: getOrCreatePlayerId(),
+  nickname: localStorage.getItem(NICKNAME_KEY) || "anon",
+  leaderboardPage: 1,
+  leaderboardPageCount: 1,
 };
+
+function getOrCreatePlayerId() {
+  let id = localStorage.getItem(PLAYER_ID_KEY);
+  if (id) return id;
+  id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  localStorage.setItem(PLAYER_ID_KEY, id);
+  return id;
+}
+
+function setNickname(name, notifyServer = true) {
+  const next = (name || "anon").trim().slice(0, 24) || "anon";
+  state.nickname = next;
+  localStorage.setItem(NICKNAME_KEY, next);
+  $("#nameInput").value = next;
+  $("#hudNameInput").value = next;
+  if (state.run) state.run.name = next;
+  if (notifyServer && state.run) send({ type: "rename_player", name: next });
+}
 
 function show(screenId) {
   $$(".screen").forEach((s) => s.classList.add("hidden"));
@@ -52,7 +79,8 @@ function handleServer(msg) {
       break;
     case "state":
       state.run = msg.run;
-      localStorage.setItem("runId", msg.run.id);
+      localStorage.setItem(RUN_ID_KEY, msg.run.id);
+      setNickname(msg.run.name, false);
       renderRun();
       break;
     case "battle":
@@ -105,11 +133,20 @@ function handleServer(msg) {
       break;
     case "leaderboard":
       show("leaderboard");
-      $("#lbList").innerHTML = msg.entries.map(e => `<li>${escape(e.name)} — streak <b>${e.streak}</b> · wins ${e.wins}</li>`).join("") || "<li>no entries yet</li>";
+      renderLeaderboard(msg);
       break;
-    case "error":
-      flash(msg.message);
+    case "error": {
+      const m = msg.message;
+      const cashDenied =
+        /^need \$[\d]+ more/i.test(m) ||
+        /costs \$[\d]+, have \$/i.test(m);
+      flash(m, {
+        variant: "error",
+        duration: cashDenied ? 3600 : 2600,
+        shakeMoney: cashDenied,
+      });
       break;
+    }
   }
 }
 
@@ -219,17 +256,31 @@ function effectiveStats(member) {
 
 function propertyText(p) {
   switch (p.kind) {
-    case "ranged": return `ranged projectile: ${escape(p.projectile)}`;
-    case "healer": return "healer";
-    case "freeze_on_hit": return `freeze on hit: ${escape(p.sprite)}`;
-    case "summon_on_enemy_death": return `summons ${escape(p.species)} on enemy death`;
-    case "summon_on_ally_death": return `summons ${escape(p.species)} on ally death`;
-    case "melee_cleave": return `melee hits front ${escape(String(p.count))} enemies`;
     case "stat_bonus": {
       const parts = STAT_KEYS
-        .map(({ key, label }) => p[key] ? `${label} ${signed(p[key])}` : null)
+        .map(({ key, label }) => (p[key] ? `${label} ${signed(p[key])}` : null))
         .filter(Boolean);
-      return parts.length ? `stat bonus: ${parts.join(", ")}` : "stat bonus";
+      return parts.length ? parts.join(", ") : "no stat bonus";
+    }
+    case "ranged": return "ranged attack";
+    case "healer": return "healer";
+    case "freeze_on_hit": return "freezes on hit";
+    case "summon_on_enemy_death": return `summon ${escape(p.species)} when an enemy dies`;
+    case "summon_on_ally_death": return `summon ${escape(p.species)} when an ally dies`;
+    case "might_on_ally_death": return (
+      `when an ally dies: might ${signed(p.might)} for this battle`
+    );
+    case "crit_strike": return `${escape(String(p.chance_percent))}% critical strike (double damage)`;
+    case "revive_once": return "revive once at full HP";
+    case "melee_cleave": return `melee hits front ${escape(String(p.count))} enemies`;
+    case "buff_formation_front": {
+      const parts = STAT_KEYS
+        .map(({ key, label }) => (p[key] ? `${label} ${signed(p[key])}` : null))
+        .filter(Boolean);
+      const bonus = parts.length ? parts.join(", ") : "stats";
+      return (
+        `front ally gets ${bonus} while this unit lives`
+      );
     }
     default: return escape(p.kind || "property");
   }
@@ -295,19 +346,36 @@ function memberTooltip(member) {
     ${itemRows}`;
 }
 
+function formationFrontAuraTooltipSection(c) {
+  const m = c.applied_front_might || 0;
+  const r = c.applied_front_reflexes || 0;
+  const w = c.applied_front_wisdom || 0;
+  const hpBonus = c.formation_hp_bonus || 0;
+  if (!m && !r && !w && !hpBonus) return "";
+  const parts = [];
+  if (m) parts.push(`might ${signed(m)}`);
+  if (r) parts.push(`reflexes ${signed(r)}`);
+  if (w) parts.push(`wisdom ${signed(w)}`);
+  if (hpBonus) parts.push(`max HP ${signed(hpBonus)}`);
+  return `<div class="tooltip-section">formation front aura</div>
+    <div class="tooltip-aura-line">${parts.join(" · ")}</div>
+    <div class="tooltip-hint">From living allies that buff your front slot.</div>`;
+}
+
 function combatantTooltip(c) {
   const cd = charDef(c.def_id);
+  const effMaxHp = (c.max_hp || 0) + (c.formation_hp_bonus || 0);
   const base = cd ? Object.fromEntries(STAT_KEYS.map(({ key }) => [key, cd[key] || 0])) : {
     might: c.might || 0,
     reflexes: c.reflexes || 0,
     wisdom: c.wisdom || 0,
-    hp: c.max_hp || c.hp || 0,
+    hp: effMaxHp,
   };
   const total = {
     might: c.might || 0,
     reflexes: c.reflexes || 0,
     wisdom: c.wisdom || 0,
-    hp: c.max_hp || c.hp || 0,
+    hp: effMaxHp,
   };
   const itemIds = [
     ["hat", c.hat_id],
@@ -324,21 +392,87 @@ function combatantTooltip(c) {
     <div class="tooltip-meta">battle unit</div>
     <div class="tooltip-hero"><img src="/assets/${escape(c.sprite)}" alt="${escape(cd?.name || c.def_id)}" /></div>
     ${statGrid(base, total, Math.max(0, c.hp || 0))}
+    ${formationFrontAuraTooltipSection(c)}
+  ${c.revive_charges ? `<div class="tooltip-section">resurrection</div><div>${escape(String(c.revive_charges))} charge${c.revive_charges === 1 ? "" : "s"} remaining</div>` : ""}
     <div class="tooltip-section">active properties</div>
     ${propertyList(c.properties || [])}
     <div class="tooltip-section">equipped items</div>
     ${itemRows}`;
 }
 
-function flash(text) {
-  const el = $("#status"); el.textContent = text; el.style.color = "#ff5cf2";
-  setTimeout(() => { el.textContent = ""; }, 2200);
+let flashTimer = null;
+
+function pulseHudMoney() {
+  const hm = $("#hudMoney");
+  if (!hm) return;
+  hm.classList.remove("money-flash");
+  void hm.offsetWidth;
+  hm.classList.add("money-flash");
+  hm.addEventListener(
+    "animationend",
+    () => hm.classList.remove("money-flash"),
+    { once: true },
+  );
+}
+
+/** @returns {string|null} */
+function insufficientMoneyLine(price) {
+  const bal = state.run?.money ?? 0;
+  if (price <= bal) return null;
+  return `need $${price - bal} more — costs $${price}, have $${bal}`;
+}
+
+/** @returns {string|null} */
+function insufficientRerollLine() {
+  const cost = state.consts.reroll_cost ?? 10;
+  const bal = state.run?.money ?? 0;
+  if (bal >= cost) return null;
+  return `need $${cost - bal} more to reroll — costs $${cost}, have $${bal}`;
+}
+
+function flash(text, opts = {}) {
+  const el = $("#status");
+  if (!el) return;
+  const { variant = "info", duration = 2400, shakeMoney = false } = opts;
+  el.textContent = text;
+  el.classList.remove("status--error", "status--info");
+  el.classList.add(variant === "error" ? "status--error" : "status--info");
+  el.setAttribute("role", variant === "error" ? "alert" : "status");
+  el.setAttribute("aria-live", variant === "error" ? "assertive" : "polite");
+  if (shakeMoney) pulseHudMoney();
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    el.textContent = "";
+    el.classList.remove("status--error", "status--info");
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    flashTimer = null;
+  }, duration);
+}
+
+function requestLeaderboard(page = state.leaderboardPage) {
+  send({ type: "leaderboard", page, per_page: LB_PAGE_SIZE });
+}
+
+function renderLeaderboard(msg) {
+  state.leaderboardPage = msg.page || 1;
+  state.leaderboardPageCount = msg.page_count || 1;
+  const startRank = (state.leaderboardPage - 1) * LB_PAGE_SIZE + 1;
+  $("#lbList").start = startRank;
+  $("#lbList").innerHTML = msg.entries.map(e =>
+    `<li>${escape(e.name)} — wins <b>${e.wins}</b> · best streak ${e.streak}</li>`
+  ).join("") || "<li>no entries yet</li>";
+  $("#lbPageInfo").textContent = `page ${state.leaderboardPage} / ${state.leaderboardPageCount}`;
+  $("#lbPrev").disabled = state.leaderboardPage <= 1;
+  $("#lbNext").disabled = state.leaderboardPage >= state.leaderboardPageCount;
 }
 
 function renderRun() {
   const r = state.run;
   if (!r) return;
-  $("#hudName").textContent = r.name;
+  if (document.activeElement !== $("#hudNameInput")) {
+    $("#hudNameInput").value = r.name;
+  }
   $("#hudMoney").textContent = r.money;
   $("#hudWins").textContent = r.wins;
   $("#hudLosses").textContent = r.losses;
@@ -495,10 +629,17 @@ function onTeamSlotDrop(e) {
     send({ type: "reorder", from: data.team, to });
   } else if (data.type === "shop_item") {
     if (!state.run.build.team[to]) return;
+    const sid = state.run.shop.items[data.slot];
+    const def = itemDef(sid);
+    const line = def ? insufficientMoneyLine(def.cost) : null;
+    if (line) {
+      flash(line, { variant: "error", shakeMoney: true, duration: 3600 });
+      return;
+    }
     send({ type: "buy_item", slot: data.slot, target: to });
   } else if (data.type === "team_item") {
     const targetSlot = firstFreeSlot(state.run.build.team[to], data.itemSlot);
-    if (!targetSlot) { flash("no open socket"); return; }
+    if (!targetSlot) { flash("no open socket", { variant: "info" }); return; }
     send({ type: "move_item", from_team: data.team, from_slot: data.slot, to_team: to, to_slot: targetSlot });
   }
 }
@@ -526,8 +667,15 @@ function onItemSocketDrop(e) {
   const targetSlot = e.currentTarget.dataset.itemSlot;
   e.currentTarget.classList.remove("drag-over");
   if (!data || !slotAccepts(targetSlot, data.itemSlot)) return;
-  if (e.currentTarget.classList.contains("filled")) { flash("item socket taken"); return; }
+  if (e.currentTarget.classList.contains("filled")) { flash("item socket taken", { variant: "info" }); return; }
   if (data.type === "shop_item") {
+    const sid = state.run.shop.items[data.slot];
+    const def = itemDef(sid);
+    const line = def ? insufficientMoneyLine(def.cost) : null;
+    if (line) {
+      flash(line, { variant: "error", shakeMoney: true, duration: 3600 });
+      return;
+    }
     send({ type: "buy_item_to_slot", slot: data.slot, target, target_slot: targetSlot });
   } else if (data.type === "team_item") {
     send({ type: "move_item", from_team: data.team, from_slot: data.slot, to_team: target, to_slot: targetSlot });
@@ -535,12 +683,14 @@ function onItemSocketDrop(e) {
 }
 
 function renderShop() {
+  const bal = state.run.money;
   const sc = $("#shopChars"); sc.innerHTML = "";
   state.run.shop.characters.forEach((id, i) => {
     if (!id) { sc.appendChild(emptyCard()); return; }
     const cd = charDef(id);
     const c = document.createElement("div");
-    c.className = "card";
+    const cantAfford = cd.cost > bal;
+    c.className = "card" + (cantAfford ? " cant-afford" : "");
     c.innerHTML = `
       <img src="/assets/${cd.sprite}" />
       <div class="name">${cd.name}</div>
@@ -548,7 +698,17 @@ function renderShop() {
       <div class="cost">$${cd.cost}</div>
     `;
     attachTooltip(c, () => characterTooltip(cd));
-    c.onclick = () => send({ type: "buy_character", slot: i });
+    c.onclick = () => {
+      if (cantAfford) {
+        flash(insufficientMoneyLine(cd.cost), {
+          variant: "error",
+          shakeMoney: true,
+          duration: 3600,
+        });
+        return;
+      }
+      send({ type: "buy_character", slot: i });
+    };
     sc.appendChild(c);
   });
   const si = $("#shopItems"); si.innerHTML = "";
@@ -556,8 +716,12 @@ function renderShop() {
     if (!id) { const e = emptyCard(); e.classList.add("item-card"); si.appendChild(e); return; }
     const it = itemDef(id);
     const c = document.createElement("div");
-    c.className = "card item-card" + (state.pendingItem === i ? " equip-mode" : "");
-    c.draggable = true;
+    const cantAfford = it.cost > bal;
+    c.className =
+      "card item-card" +
+      (state.pendingItem === i ? " equip-mode" : "") +
+      (cantAfford ? " cant-afford" : "");
+    c.draggable = !cantAfford;
     c.innerHTML = `
       <img src="/assets/${it.sprite}" />
       <div class="name">${it.name}</div>
@@ -583,7 +747,20 @@ const emptyCard = () => { const e = document.createElement("div"); e.className="
 
 function onTeamSlotClick(idx, hasMember) {
   if (state.pendingItem !== null) {
-    if (!hasMember) { flash("equip onto a character"); return; }
+    if (!hasMember) {
+      flash("equip onto a character", { variant: "info" });
+      return;
+    }
+    const sid = state.run.shop.items[state.pendingItem];
+    const def = itemDef(sid);
+    const line = def ? insufficientMoneyLine(def.cost) : null;
+    if (line) {
+      flash(line, { variant: "error", shakeMoney: true, duration: 3600 });
+      state.pendingItem = null;
+      renderTeam();
+      renderShop();
+      return;
+    }
     send({ type: "buy_item", slot: state.pendingItem, target: idx });
     state.pendingItem = null;
     return;
@@ -617,22 +794,48 @@ function wireInventoryDrop() {
 }
 
 // Wire UI
+$("#nameInput").value = state.nickname;
+$("#hudNameInput").value = state.nickname;
+$("#saveStartNicknameBtn").onclick = () => {
+  setNickname($("#nameInput").value);
+  flash("nickname saved", { variant: "info" });
+};
+$("#saveNicknameBtn").onclick = () => {
+  setNickname($("#hudNameInput").value);
+  flash("nickname saved", { variant: "info" });
+};
+$("#nameInput").addEventListener("change", () => setNickname($("#nameInput").value, false));
+$("#hudNameInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    setNickname($("#hudNameInput").value);
+    flash("nickname saved", { variant: "info" });
+  }
+});
 $("#newRunBtn").onclick = () => {
-  const name = $("#nameInput").value.trim() || "anon";
-  send({ type: "new_run", name });
+  setNickname($("#nameInput").value, false);
+  send({ type: "new_run", player_id: state.playerId, name: state.nickname });
 };
 $("#resumeBtn").onclick = () => {
-  const id = localStorage.getItem("runId");
-  if (!id) return flash("no saved run");
+  const id = localStorage.getItem(RUN_ID_KEY);
+  if (!id) return flash("no saved run", { variant: "info" });
   send({ type: "resume", run_id: id });
 };
-$("#lbBtn").onclick = () => send({ type: "leaderboard" });
+$("#lbBtn").onclick = () => requestLeaderboard(1);
 $("#lbBack").onclick = () => { if (state.run) renderRun(); else show("start"); };
-$("#rerollBtn").onclick = () => send({ type: "reroll" });
+$("#lbPrev").onclick = () => requestLeaderboard(Math.max(1, state.leaderboardPage - 1));
+$("#lbNext").onclick = () => requestLeaderboard(Math.min(state.leaderboardPageCount, state.leaderboardPage + 1));
+$("#rerollBtn").onclick = () => {
+  const line = insufficientRerollLine();
+  if (line) {
+    flash(line, { variant: "error", shakeMoney: true, duration: 3600 });
+    return;
+  }
+  send({ type: "reroll" });
+};
 $("#battleBtn").onclick = () => send({ type: "battle" });
 $("#nextRoundBtn").onclick = () => send({ type: "next_round" });
-$("#goRestart").onclick = () => { localStorage.removeItem("runId"); show("start"); };
-$("#goLb").onclick = () => send({ type: "leaderboard" });
+$("#goRestart").onclick = () => { localStorage.removeItem(RUN_ID_KEY); state.run = null; show("start"); };
+$("#goLb").onclick = () => requestLeaderboard(1);
 
 wireInventoryDrop();
 show("start");

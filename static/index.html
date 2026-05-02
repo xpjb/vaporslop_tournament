@@ -10,11 +10,15 @@
   <div id="bg"></div>
   <header>
     <h1>VAPORSLOP <span class="dim">// T O U R N A M E N T</span></h1>
-    <div id="status"></div>
+    <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
   </header>
   <main>
     <div id="runHud" class="hud hidden">
-      <div>name: <b id="hudName"></b></div>
+      <div class="player-controls">
+        name:
+        <input id="hudNameInput" maxlength="24" />
+        <button id="saveNicknameBtn" class="ghost">save</button>
+      </div>
       <div>$<b id="hudMoney">0</b></div>
       <div>wins: <b id="hudWins">0</b></div>
       <div>losses: <b id="hudLosses">0</b>/<span id="hudMaxLosses">3</span></div>
@@ -24,6 +28,7 @@
     <section id="start" class="screen">
       <h2>enter the arcade</h2>
       <input id="nameInput" maxlength="24" placeholder="your handle" />
+      <button id="saveStartNicknameBtn" class="ghost">save nickname</button>
       <button id="newRunBtn">new run</button>
       <div class="row">
         <button id="resumeBtn" class="ghost">resume last run</button>
@@ -79,6 +84,11 @@
     <section id="leaderboard" class="screen hidden">
       <h2>leaderboard</h2>
       <ol id="lbList"></ol>
+      <div class="row controls lb-controls">
+        <button id="lbPrev" class="ghost">prev</button>
+        <span id="lbPageInfo">page 1 / 1</span>
+        <button id="lbNext" class="ghost">next</button>
+      </div>
       <button id="lbBack" class="ghost">back</button>
     </section>
   </main>

@@ -24,11 +24,16 @@ class Sprite {
     this.left_hand_id = c.left_hand_id;
     this.right_hand_id = c.right_hand_id;
     this.max_hp = c.max_hp;
+    this.formation_hp_bonus = c.formation_hp_bonus || 0;
     this.hp = c.hp;
     this.might = c.might;
     this.reflexes = c.reflexes;
     this.wisdom = c.wisdom;
     this.properties = c.properties || [];
+    this.revive_charges = c.revive_charges ?? 0;
+    this.applied_front_might = c.applied_front_might ?? 0;
+    this.applied_front_reflexes = c.applied_front_reflexes ?? 0;
+    this.applied_front_wisdom = c.applied_front_wisdom ?? 0;
     this.x = 0; this.y = FLOOR_Y;
     this.targetX = 0;
     this.dead = false;
@@ -70,6 +75,21 @@ function drawSprite(ctx, s, t) {
   if (s.shake > 0) { x += (Math.random() - .5) * s.shake; y += (Math.random() - .5) * s.shake; }
   s.bounds = { x, y: y - 28, w, h: h + 34 };
   ctx.save();
+  const auraAmt =
+    (s.applied_front_might || 0) +
+    (s.applied_front_reflexes || 0) +
+    (s.applied_front_wisdom || 0) +
+    (s.formation_hp_bonus || 0);
+  if (auraAmt > 0) {
+    ctx.strokeStyle = "rgba(255, 243, 108, 0.9)";
+    ctx.lineWidth = 3;
+    ctx.shadowColor = "rgba(74, 242, 255, 0.85)";
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    ctx.ellipse(x + w / 2, y + h / 2 - 8, w * 0.52, h * 0.58, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
   if (s.flashUntil > t) ctx.filter = "brightness(2.5) hue-rotate(80deg)";
   if (s.side === 1) { ctx.translate(x + w/2, 0); ctx.scale(-1, 1); ctx.translate(-(x + w/2), 0); }
   if (i.complete && i.naturalWidth) ctx.drawImage(i, x, y, w, h);
@@ -101,7 +121,8 @@ function drawSprite(ctx, s, t) {
   }
 
   // HP bar
-  const pct = Math.max(0, s.hp) / s.max_hp;
+  const effMax = Math.max(1, s.max_hp + (s.formation_hp_bonus || 0));
+  const pct = Math.max(0, s.hp) / effMax;
   ctx.fillStyle = "#000"; ctx.fillRect(x, y - 12, w, 6);
   ctx.fillStyle = pct > 0.5 ? "#4af2ff" : pct > 0.25 ? "#fff36c" : "#ff5cf2";
   ctx.fillRect(x, y - 12, w * pct, 6);
@@ -241,7 +262,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
             damage: ev.damage,
             t: 0,
           });
-          log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}` : `${a.def_id} misses ${t.def_id}`);
+          log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}${ev.critical ? " (crit!)" : ""}` : `${a.def_id} misses ${t.def_id}`);
         } else {
           // melee lunge
           const dir = a.side === 0 ? 1 : -1;
@@ -252,7 +273,22 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
             t.shake = 6;
             setTimeout(() => { t.shake = 0; }, 200);
           }
-          log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}` : `${a.def_id} misses ${t.def_id}`);
+          log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}${ev.critical ? " (crit!)" : ""}` : `${a.def_id} misses ${t.def_id}`);
+        }
+        break;
+      }
+      case "stat_sync": {
+        const s = spritesById.get(ev.uid);
+        if (s) {
+          s.might = ev.might;
+          s.reflexes = ev.reflexes;
+          s.wisdom = ev.wisdom;
+          s.max_hp = ev.max_hp;
+          s.hp = ev.hp;
+          s.formation_hp_bonus = ev.formation_hp_bonus || 0;
+          s.applied_front_might = ev.applied_front_might ?? 0;
+          s.applied_front_reflexes = ev.applied_front_reflexes ?? 0;
+          s.applied_front_wisdom = ev.applied_front_wisdom ?? 0;
         }
         break;
       }
@@ -279,6 +315,16 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         leftList = leftList.filter(x => !x.dead);
         rightList = rightList.filter(x => !x.dead);
         layout(leftList, rightList, canvas);
+        break;
+      }
+      case "revive": {
+        const s = spritesById.get(ev.uid);
+        if (s) {
+          s.hp = ev.hp;
+          s.revive_charges = Math.max(0, (s.revive_charges || 0) - 1);
+          s.flashUntil = performance.now() + 350;
+        }
+        log(`${s?.def_id ?? "?"} resurrects!`);
         break;
       }
       case "summon": {
@@ -308,7 +354,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     if (now >= nextEventAt && i < events.length) {
       const ev = events[i++];
       applyEvent(ev);
-      nextEventAt = now + (ev.type === "attack" || ev.type === "death" || ev.type === "freeze" ? 380 : 120);
+      nextEventAt = now + (ev.type === "attack" || ev.type === "death" || ev.type === "freeze" || ev.type === "revive" ? 380 : 120);
     }
 
     // projectiles

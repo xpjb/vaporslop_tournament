@@ -18,9 +18,17 @@ pub enum Property {
     FreezeOnHit { sprite: String },
     SummonOnEnemyDeath { species: String },
     SummonOnAllyDeath { species: String },
+    /// Living wearer gains this much might each time an ally on the same side dies.
+    MightOnAllyDeath { might: i32 },
+    /// On each damaging hit, chance_percent roll (0–100) to deal double damage.
+    CritStrike { chance_percent: u8 },
+    /// Once per battle, when HP reaches 0, revive at full effective HP (charges tracked at runtime).
+    ReviveOnce,
     /// Melee only: hit the first `count` living enemies in formation order per swing.
     MeleeCleave { count: u8 },
     StatBonus { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
+    /// While alive, adds these stats to the ally in formation front (first living slot).
+    BuffFormationFront { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,11 +106,13 @@ pub struct Shop {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
+    pub player_id: String,
     pub name: String,
     pub money: i32,
     pub wins: i32,
     pub losses: i32,
     pub streak: i32,
+    pub best_streak: i32,
     pub alive: bool,
     pub build: Build,
     pub shop: Shop,

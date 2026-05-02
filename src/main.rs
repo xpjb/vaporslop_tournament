@@ -28,8 +28,9 @@ struct AppState {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
-    NewRun { name: String },
+    NewRun { player_id: String, name: String },
     Resume { run_id: String },
+    RenamePlayer { name: String },
     BuyCharacter { slot: usize },           // shop char slot
     BuyItem { slot: usize, target: usize }, // shop item slot, target team index
     BuyItemToSlot { slot: usize, target: usize, target_slot: ItemSlot },
@@ -40,7 +41,7 @@ enum ClientMsg {
     Reroll,
     Battle,
     NextRound,    // returns to shop after battle
-    Leaderboard,
+    Leaderboard { page: Option<usize>, per_page: Option<usize> },
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +68,8 @@ enum ServerMsg {
     },
     Leaderboard {
         entries: Vec<LbEntry>,
+        page: usize,
+        page_count: usize,
     },
     Error {
         message: String,
@@ -85,6 +88,27 @@ struct Constants {
 
 #[derive(Debug, Serialize)]
 struct LbEntry { name: String, streak: i32, wins: i32 }
+
+const DEFAULT_LEADERBOARD_PAGE_SIZE: usize = 10;
+const MAX_LEADERBOARD_PAGE_SIZE: usize = 50;
+
+fn insufficient_money_msg(price: i32, wallet: i32) -> String {
+    format!(
+        "need ${} more — costs ${}, have ${}",
+        (price - wallet).max(0),
+        price,
+        wallet
+    )
+}
+
+fn insufficient_reroll_msg(wallet: i32) -> String {
+    format!(
+        "need ${} more to reroll — costs ${}, have ${}",
+        (REROLL_COST - wallet).max(0),
+        REROLL_COST,
+        wallet
+    )
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -144,12 +168,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         };
 
         match cmsg {
-            ClientMsg::NewRun { name } => {
+            ClientMsg::NewRun { player_id, name } => {
                 let run = Run {
                     id: uuid::Uuid::new_v4().to_string(),
+                    player_id: clean_player_id(&player_id),
                     name: name.chars().take(24).collect(),
                     money: STARTING_MONEY,
                     wins: 0, losses: 0, streak: 0, alive: true,
+                    best_streak: 0,
                     build: Build::default(),
                     shop: roll_shop(),
                     phase: Phase::Shop,
@@ -167,6 +193,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     Ok(Some(run)) => { current_run_id = Some(run.id.clone()); send(&mut socket, &ServerMsg::State { run }).await; }
                     Ok(None) => send(&mut socket, &ServerMsg::Error { message: "run not found".into() }).await,
                     Err(e) => send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await,
+                }
+            }
+            ClientMsg::Leaderboard { page, per_page } => {
+                match leaderboard_msg(&state, page, per_page) {
+                    Ok(msg) => send(&mut socket, &msg).await,
+                    Err(e) => send(&mut socket, &ServerMsg::Error { message: e }).await,
                 }
             }
             other => {
@@ -194,7 +226,9 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
             if run.phase != Phase::Shop { return Err("not in shop".into()); }
             let id = run.shop.characters.get(slot).and_then(|s| s.clone()).ok_or("slot empty")?;
             let def = character_def(&id).ok_or("unknown char")?;
-            if run.money < def.cost { return Err("not enough money".into()); }
+            if run.money < def.cost {
+                return Err(insufficient_money_msg(def.cost, run.money));
+            }
             if run.build.team.len() >= MAX_TEAM { return Err("team full".into()); }
             run.money -= def.cost;
             run.build.team.push(TeamMember { def_id: id, hat: None, left_hand: None, right_hand: None });
@@ -205,7 +239,9 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
             if run.phase != Phase::Shop { return Err("not in shop".into()); }
             let id = run.shop.items.get(slot).and_then(|s| s.clone()).ok_or("slot empty")?;
             let def = item_def(&id).ok_or("unknown item")?;
-            if run.money < def.cost { return Err("not enough money".into()); }
+            if run.money < def.cost {
+                return Err(insufficient_money_msg(def.cost, run.money));
+            }
             let member = run.build.team.get_mut(target).ok_or("no such team member")?;
             match def.slot {
                 ItemSlot::Hat => { if member.hat.is_some() { return Err("hat slot taken".into()); } member.hat = Some(id); }
@@ -230,7 +266,9 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
             if run.phase != Phase::Shop { return Err("not in shop".into()); }
             let id = run.shop.items.get(slot).and_then(|s| s.clone()).ok_or("slot empty")?;
             let def = item_def(&id).ok_or("unknown item")?;
-            if run.money < def.cost { return Err("not enough money".into()); }
+            if run.money < def.cost {
+                return Err(insufficient_money_msg(def.cost, run.money));
+            }
             if !slot_accepts(target_slot, def.slot) { return Err("wrong item socket".into()); }
             let member = run.build.team.get_mut(target).ok_or("no such team member")?;
             let dest = member_item_slot_mut(member, target_slot);
@@ -284,7 +322,9 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
         }
         ClientMsg::Reroll => {
             if run.phase != Phase::Shop { return Err("not in shop".into()); }
-            if run.money < REROLL_COST { return Err("can't afford reroll".into()); }
+            if run.money < REROLL_COST {
+                return Err(insufficient_reroll_msg(run.money));
+            }
             run.money -= REROLL_COST;
             run.shop = roll_shop();
             Ok(None)
@@ -304,15 +344,16 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
                 run.money += WIN_REWARD;
                 run.wins += 1;
                 run.streak += 1;
+                run.best_streak = run.best_streak.max(run.streak);
             } else {
                 run.money += LOSE_REWARD;
                 run.losses += 1;
                 run.streak = 0;
             }
+            let _ = state.db.record_score(&run.player_id, &run.name, run.best_streak, run.wins);
             if run.losses >= MAX_LOSSES {
                 run.alive = false;
                 run.phase = Phase::GameOver;
-                let _ = state.db.record_streak(&run.name, run.wins, run.wins);
             } else {
                 run.phase = Phase::Battle; // will move back to shop on NextRound
                 // Reroll shop for next round (only if continuing)
@@ -341,13 +382,39 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
             }
             Ok(None)
         }
-        ClientMsg::Leaderboard => {
-            let entries = state.db.leaderboard().map_err(|e| e.to_string())?
-                .into_iter().map(|(name, streak, wins)| LbEntry { name, streak, wins }).collect();
-            Ok(Some(ServerMsg::Leaderboard { entries }))
+        ClientMsg::RenamePlayer { name } => {
+            let name: String = name.chars().take(24).collect();
+            if name.trim().is_empty() { return Err("name required".into()); }
+            run.name = name;
+            Ok(None)
+        }
+        ClientMsg::Leaderboard { page, per_page } => {
+            leaderboard_msg(state, page, per_page).map(Some)
         }
         _ => Err("unhandled".into()),
     }
+}
+
+fn clean_player_id(player_id: &str) -> String {
+    let id = player_id.trim();
+    if id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        id.chars().take(64).collect()
+    }
+}
+
+fn leaderboard_msg(state: &AppState, page: Option<usize>, per_page: Option<usize>) -> Result<ServerMsg, String> {
+    let per_page = per_page
+        .unwrap_or(DEFAULT_LEADERBOARD_PAGE_SIZE)
+        .clamp(1, MAX_LEADERBOARD_PAGE_SIZE);
+    let page = page.unwrap_or(1).max(1);
+    let (entries, page_count) = state.db.leaderboard(page, per_page).map_err(|e| e.to_string())?;
+    Ok(ServerMsg::Leaderboard {
+        entries: entries.into_iter().map(|(name, streak, wins)| LbEntry { name, streak, wins }).collect(),
+        page: page.min(page_count),
+        page_count,
+    })
 }
 
 fn total_earned_gold(run: &Run) -> i32 {

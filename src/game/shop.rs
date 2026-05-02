@@ -143,11 +143,18 @@ fn is_frontline_member(member: &TeamMember) -> bool {
 }
 
 fn is_frontline_def(def: &CharacterDef) -> bool {
-    !def.properties.iter().any(|p| matches!(p, Property::Ranged { .. } | Property::Healer))
+    !is_backline_def(def)
 }
 
 fn is_backline_def(def: &CharacterDef) -> bool {
-    def.properties.iter().any(|p| matches!(p, Property::Ranged { .. } | Property::Healer))
+    def.properties.iter().any(|p| {
+        matches!(
+            p,
+            Property::Ranged { .. }
+                | Property::Healer
+                | Property::BuffFormationFront { .. }
+        )
+    })
 }
 
 fn front_score(def: &CharacterDef) -> i32 {

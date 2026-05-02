@@ -1,13 +1,9 @@
-use crate::game::shop::ai_ladder_build;
 use crate::game::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use rusqlite::{params, Connection};
 use std::sync::Arc;
-
-const AI_LADDER_STEPS: usize = 100;
-const AI_LADDER_GROWTH: f32 = 1.05;
 
 #[derive(Clone)]
 pub struct Db {
@@ -67,38 +63,16 @@ impl Db {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_player ON leaderboard(player_id)",
             [],
         )?;
-        let db = Db { conn: Arc::new(Mutex::new(conn)) };
-        db.maybe_seed()?;
-        Ok(db)
-    }
-
-    fn maybe_seed(&self) -> Result<()> {
-        let count: i64 = self.conn.lock().query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
-        if count > 0 { return Ok(()); }
-        let names = ["aesthet1c", "vapor", "moonbeam", "y2k", "memehead", "cybr", "lofi", "pix3l", "tokr", "dolphin", "neon", "glitch"];
-        let mut target = STARTING_MONEY as f32;
-        for i in 0..AI_LADDER_STEPS {
-            let name = format!("{}_bot_{:03}", names[i % names.len()], i + 1);
-            let build = ai_ladder_build(target.round() as i32);
-            let cost = build.cost_value();
-            let run = Run {
-                id: uuid::Uuid::new_v4().to_string(),
-                player_id: uuid::Uuid::new_v4().to_string(),
-                name,
-                money: 0,
-                wins: 0,
-                losses: 0,
-                streak: 0,
-                best_streak: 0,
-                alive: true,
-                build,
-                shop: Shop::default(),
-                phase: Phase::Shop,
-            };
-            self.upsert_run(&run, cost)?;
-            target *= AI_LADDER_GROWTH;
+        let db_ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if db_ver < 2 {
+            // One-time: remove ladder rows from older versions (bots are generated on demand now).
+            conn.execute(
+                "DELETE FROM runs WHERE name GLOB '*_bot_[0-9][0-9][0-9]'",
+                [],
+            )?;
+            conn.pragma_update(None, "user_version", 2)?;
         }
-        Ok(())
+        Ok(Db { conn: Arc::new(Mutex::new(conn)) })
     }
 
     pub fn upsert_run(&self, run: &Run, cost: i32) -> Result<()> {
@@ -113,7 +87,8 @@ impl Db {
                build_json=excluded.build_json, shop_json=excluded.shop_json,
                cost_value=excluded.cost_value, updated_at=excluded.updated_at",
             params![
-                run.id, run.player_id, run.name, run.money, run.wins, run.losses,
+                run.id, run.player_id, run.name,
+                run.money, run.wins, run.losses,
                 run.streak, run.best_streak,
                 if run.alive { 1 } else { 0 },
                 serde_json::to_string(&run.phase)?,
@@ -150,7 +125,7 @@ impl Db {
         } else { Ok(None) }
     }
 
-    /// Find a matchup whose actual build cost is near the requested gold budget.
+    /// Find another player's build whose cost is near the requested gold budget. No bot rows exist in the DB.
     pub fn find_opponent(&self, current_run_id: &str, target_cost: i32) -> Result<Option<(String, String, Build)>> {
         let conn = self.conn.lock();
         let band = ((target_cost as f32) * 0.05).ceil().max(1.0) as i32;
@@ -281,15 +256,6 @@ mod tests {
                 right_hand: None,
             }],
         }
-    }
-
-    #[test]
-    fn seeds_one_hundred_ladder_runs() {
-        let db = test_db();
-        let count: i64 = db.conn.lock()
-            .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, AI_LADDER_STEPS as i64);
     }
 
     #[test]

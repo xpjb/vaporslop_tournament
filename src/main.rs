@@ -15,6 +15,7 @@ use game::combat::resolve_battle;
 use game::data::*;
 use game::shop::{ai_ladder_build, roll_shop};
 use game::types::*;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -333,7 +334,7 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
             let opponent = state.db.find_opponent(&run.id, target_gold).map_err(|e| e.to_string())?;
             let (op_name, op_build_raw) = match opponent {
                 Some((_id, name, b)) => (name, b),
-                None => ("ghost".to_string(), ai_ladder_build(target_gold.max(50))),
+                None => (synthetic_opponent_name(), ai_ladder_build(target_gold.max(50))),
             };
             let res = resolve_battle(&run.build, &op_build_raw);
             let won = res.winner == Some(0);
@@ -416,6 +417,19 @@ fn leaderboard_msg(state: &AppState, page: Option<usize>, per_page: Option<usize
 
 fn total_earned_gold(run: &Run) -> i32 {
     STARTING_MONEY + run.wins * WIN_REWARD + run.losses * LOSE_REWARD
+}
+
+fn synthetic_opponent_name() -> String {
+    const TAGS: &[&str] = &[
+        "aesthet1c", "vapor", "moonbeam", "y2k", "memehead", "cybr", "lofi", "pix3l", "tokr",
+        "dolphin", "neon", "glitch",
+    ];
+    let mut rng = rand::thread_rng();
+    format!(
+        "{}_bot_{:03}",
+        TAGS[rng.gen_range(0..TAGS.len())],
+        rng.gen_range(1..=999)
+    )
 }
 
 fn member_item_slot(member: &TeamMember, slot: ItemSlot) -> &Option<String> {

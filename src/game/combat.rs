@@ -103,8 +103,8 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
     }).collect()
 }
 
+/// Hit chance vs the defender's frontliner. Same formula for melee and ranged.
 fn hit_chance(att: &Combatant, def: &Combatant) -> f32 {
-    // Simple model: base 0.7, modified by reflex diff. Clamped.
     let diff = (att.reflexes - def.reflexes) as f32;
     (0.7 + diff * 0.03).clamp(0.1, 0.95)
 }
@@ -118,6 +118,122 @@ fn first_damaged_idx(team: &[Combatant], excluding: u32) -> Option<usize> {
         .filter(|(_, c)| c.hp > 0 && c.hp < c.max_hp && c.uid != excluding)
         .min_by_key(|(_, c)| c.max_hp - c.hp) // any damaged; pick least-damaged so heals top up
         .map(|(i, _)| i)
+}
+
+fn summon_on_enemy_death(
+    actors: &mut Vec<Combatant>,
+    dead_def: &str,
+    attacker_side: u8,
+    events: &mut Vec<CombatEvent>,
+    uid_counter: &mut u32,
+) {
+    let mut summons: Vec<(Combatant, u32)> = vec![];
+    for ally in actors.iter() {
+        if ally.hp <= 0 { continue; }
+        for p in &ally.properties {
+            if let Property::SummonOnEnemyDeath { species } = p {
+                if dead_def != species.as_str() && actors.iter().filter(|c| c.hp > 0).count() + summons.len() < MAX_TEAM {
+                    if let Some(def) = character_def(species) {
+                        let uid = *uid_counter;
+                        *uid_counter += 1;
+                        summons.push((
+                            Combatant {
+                                uid,
+                                def_id: def.id.clone(),
+                                sprite: def.sprite.clone(),
+                                hat_id: None, left_hand_id: None, right_hand_id: None,
+                                hat_sprite: None, left_hand_sprite: None, right_hand_sprite: None,
+                                max_hp: def.hp, hp: def.hp,
+                                might: def.might, reflexes: def.reflexes, wisdom: def.wisdom,
+                                properties: def.properties.clone(),
+                                frozen_turns: 0,
+                                side: attacker_side,
+                            },
+                            ally.uid,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (s, summoner_uid) in summons {
+        events.push(CombatEvent::Summon {
+            side: attacker_side,
+            summoner: summoner_uid,
+            combatant: s.clone(),
+        });
+        if let Some(idx) = actors.iter().position(|c| c.uid == summoner_uid) {
+            actors.insert(idx, s);
+        } else {
+            actors.push(s);
+        }
+    }
+}
+
+fn summon_on_ally_death(
+    foes: &mut Vec<Combatant>,
+    dead_def: &str,
+    dead_side: u8,
+    events: &mut Vec<CombatEvent>,
+    uid_counter: &mut u32,
+) {
+    let mut ally_summons: Vec<(Combatant, u32)> = vec![];
+    for ally in foes.iter() {
+        if ally.hp <= 0 { continue; }
+        for p in &ally.properties {
+            if let Property::SummonOnAllyDeath { species } = p {
+                if dead_def != species.as_str() && foes.iter().filter(|c| c.hp > 0).count() + ally_summons.len() < MAX_TEAM {
+                    if let Some(def) = character_def(species) {
+                        let uid = *uid_counter;
+                        *uid_counter += 1;
+                        ally_summons.push((
+                            Combatant {
+                                uid,
+                                def_id: def.id.clone(),
+                                sprite: def.sprite.clone(),
+                                hat_id: None, left_hand_id: None, right_hand_id: None,
+                                hat_sprite: None, left_hand_sprite: None, right_hand_sprite: None,
+                                max_hp: def.hp, hp: def.hp,
+                                might: def.might, reflexes: def.reflexes, wisdom: def.wisdom,
+                                properties: def.properties.clone(),
+                                frozen_turns: 0,
+                                side: dead_side,
+                            },
+                            ally.uid,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (s, summoner_uid) in ally_summons {
+        events.push(CombatEvent::Summon {
+            side: dead_side,
+            summoner: summoner_uid,
+            combatant: s.clone(),
+        });
+        if let Some(idx) = foes.iter().position(|c| c.uid == summoner_uid) {
+            foes.insert(idx, s);
+        } else {
+            foes.push(s);
+        }
+    }
+}
+
+fn handle_foe_killed(
+    foes: &mut Vec<Combatant>,
+    actors: &mut Vec<Combatant>,
+    foe_idx: usize,
+    attacker_side: u8,
+    events: &mut Vec<CombatEvent>,
+    uid_counter: &mut u32,
+) {
+    let dead_uid = foes[foe_idx].uid;
+    let dead_def = foes[foe_idx].def_id.clone();
+    let dead_side = foes[foe_idx].side;
+    events.push(CombatEvent::Death { uid: dead_uid, side: dead_side });
+    summon_on_enemy_death(actors, &dead_def, attacker_side, events, uid_counter);
+    summon_on_ally_death(foes, &dead_def, dead_side, events, uid_counter);
 }
 
 pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
@@ -173,7 +289,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                 }
 
                 // Attack: front=melee, non-front+ranged=ranged, otherwise no action.
-                let foe_front = match first_alive_idx(foes) { Some(x) => x, None => break };
+                if first_alive_idx(foes).is_none() { break; }
                 let (ranged, projectile, damage_stat) = if is_front {
                     (false, None, actors[i].might)
                 } else if has_ranged {
@@ -185,75 +301,50 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                     continue;
                 };
 
-                let chance = hit_chance(&actors[i], &foes[foe_front]);
-                let hit = rng.gen::<f32>() < chance;
-                events.push(CombatEvent::Attack {
-                    attacker: actors[i].uid,
-                    target: foes[foe_front].uid,
-                    ranged, projectile: projectile.clone(),
-                    damage: if hit { damage_stat } else { 0 },
-                    hit,
-                });
-                if hit {
-                    foes[foe_front].hp -= damage_stat;
-                    events.push(CombatEvent::Hp { uid: foes[foe_front].uid, hp: foes[foe_front].hp.max(0) });
-
-                    // Freeze on hit
-                    if let Some(spr) = actors[i].properties.iter().find_map(|p| {
-                        if let Property::FreezeOnHit { sprite } = p { Some(sprite.clone()) } else { None }
-                    }) {
-                        if foes[foe_front].hp > 0 {
-                            foes[foe_front].frozen_turns = 1;
-                            events.push(CombatEvent::Freeze { target: foes[foe_front].uid, sprite: spr });
+                let cleave_count = if !ranged {
+                    actors[i].properties.iter().find_map(|p| {
+                        if let Property::MeleeCleave { count } = p {
+                            Some((*count).max(1) as usize)
+                        } else {
+                            None
                         }
-                    }
+                    }).unwrap_or(1)
+                } else {
+                    1
+                };
 
-                    if foes[foe_front].hp <= 0 {
-                        let dead_uid = foes[foe_front].uid;
-                        let dead_def = foes[foe_front].def_id.clone();
-                        let dead_side = foes[foe_front].side;
-                        events.push(CombatEvent::Death { uid: dead_uid, side: dead_side });
+                let foe_indices: Vec<usize> = foes.iter().enumerate()
+                    .filter(|(_, c)| c.hp > 0)
+                    .take(cleave_count)
+                    .map(|(idx, _)| idx)
+                    .collect();
 
-                        // Trigger SummonOnEnemyDeath on the *attacker's* team.
-                        let mut summons: Vec<(Combatant, u32)> = vec![];
-                        for ally in actors.iter() {
-                            if ally.hp <= 0 { continue; }
-                            for p in &ally.properties {
-                                if let Property::SummonOnEnemyDeath { species } = p {
-                                    if dead_def != *species && actors.iter().filter(|c| c.hp > 0).count() + summons.len() < MAX_TEAM {
-                                        if let Some(def) = character_def(species) {
-                                            let uid = uid_counter; uid_counter += 1;
-                                            summons.push((
-                                                Combatant {
-                                                    uid,
-                                                    def_id: def.id.clone(),
-                                                    sprite: def.sprite.clone(),
-                                                    hat_id: None, left_hand_id: None, right_hand_id: None,
-                                                    hat_sprite: None, left_hand_sprite: None, right_hand_sprite: None,
-                                                    max_hp: def.hp, hp: def.hp,
-                                                    might: def.might, reflexes: def.reflexes, wisdom: def.wisdom,
-                                                    properties: def.properties.clone(),
-                                                    frozen_turns: 0,
-                                                    side,
-                                                },
-                                                ally.uid,
-                                            ));
-                                        }
-                                    }
-                                }
+                for &foe_idx in &foe_indices {
+                    let chance = hit_chance(&actors[i], &foes[foe_idx]);
+                    let hit = rng.gen::<f32>() < chance;
+                    events.push(CombatEvent::Attack {
+                        attacker: actors[i].uid,
+                        target: foes[foe_idx].uid,
+                        ranged,
+                        projectile: projectile.clone(),
+                        damage: if hit { damage_stat } else { 0 },
+                        hit,
+                    });
+                    if hit {
+                        foes[foe_idx].hp -= damage_stat;
+                        events.push(CombatEvent::Hp { uid: foes[foe_idx].uid, hp: foes[foe_idx].hp.max(0) });
+
+                        if let Some(spr) = actors[i].properties.iter().find_map(|p| {
+                            if let Property::FreezeOnHit { sprite } = p { Some(sprite.clone()) } else { None }
+                        }) {
+                            if foes[foe_idx].hp > 0 {
+                                foes[foe_idx].frozen_turns = 1;
+                                events.push(CombatEvent::Freeze { target: foes[foe_idx].uid, sprite: spr });
                             }
                         }
-                        for (s, summoner_uid) in summons {
-                            events.push(CombatEvent::Summon {
-                                side,
-                                summoner: summoner_uid,
-                                combatant: s.clone(),
-                            });
-                            if let Some(idx) = actors.iter().position(|c| c.uid == summoner_uid) {
-                                actors.insert(idx, s);
-                            } else {
-                                actors.push(s);
-                            }
+
+                        if foes[foe_idx].hp <= 0 {
+                            handle_foe_killed(foes, actors, foe_idx, side, &mut events, &mut uid_counter);
                         }
                     }
                 }

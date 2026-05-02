@@ -59,6 +59,11 @@ enum ServerMsg {
         events: Vec<game::combat::CombatEvent>,
         winner: Option<u8>,
         money_after: i32,
+        phase: Phase,
+        wins: i32,
+        losses: i32,
+        streak: i32,
+        alive: bool,
     },
     Leaderboard {
         entries: Vec<LbEntry>,
@@ -318,10 +323,22 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
                 events: res.events,
                 winner: res.winner,
                 money_after: run.money,
+                phase: run.phase,
+                wins: run.wins,
+                losses: run.losses,
+                streak: run.streak,
+                alive: run.alive,
             }))
         }
         ClientMsg::NextRound => {
-            if run.phase == Phase::Battle { run.phase = Phase::Shop; }
+            if run.phase == Phase::Battle {
+                if run.losses >= MAX_LOSSES {
+                    run.phase = Phase::GameOver;
+                    run.alive = false;
+                } else {
+                    run.phase = Phase::Shop;
+                }
+            }
             Ok(None)
         }
         ClientMsg::Leaderboard => {

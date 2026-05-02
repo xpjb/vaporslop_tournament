@@ -13,6 +13,14 @@
     <div id="status"></div>
   </header>
   <main>
+    <div id="runHud" class="hud hidden">
+      <div>name: <b id="hudName"></b></div>
+      <div>$<b id="hudMoney">0</b></div>
+      <div>wins: <b id="hudWins">0</b></div>
+      <div>losses: <b id="hudLosses">0</b>/<span id="hudMaxLosses">3</span></div>
+      <div>streak: <b id="hudStreak">0</b></div>
+    </div>
+
     <section id="start" class="screen">
       <h2>enter the arcade</h2>
       <input id="nameInput" maxlength="24" placeholder="your handle" />
@@ -24,13 +32,6 @@
     </section>
 
     <section id="shop" class="screen hidden">
-      <div class="hud">
-        <div>name: <b id="hudName"></b></div>
-        <div>$<b id="hudMoney">0</b></div>
-        <div>wins: <b id="hudWins">0</b></div>
-        <div>losses: <b id="hudLosses">0</b>/<span id="hudMaxLosses">3</span></div>
-        <div>streak: <b id="hudStreak">0</b></div>
-      </div>
       <h3>your team</h3>
       <div id="teamDirections">
         <span>← back</span>

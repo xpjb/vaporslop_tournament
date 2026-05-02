@@ -221,16 +221,27 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         const t = spritesById.get(ev.target);
         if (!a || !t) break;
         if (ev.ranged && ev.projectile) {
+          const aimX = t.x + 32;
+          const aimY = t.y - 64;
+          // Same hit/miss as melee (server: reflex vs reflex). Miss flies past/side so it reads as dodged.
+          const towardEnemy = a.side === 0 ? 1 : -1;
+          let tx = aimX;
+          let ty = aimY;
+          if (!ev.hit) {
+            tx = aimX + towardEnemy * (48 + Math.random() * 36);
+            ty = aimY + (Math.random() - 0.5) * 56;
+          }
           projectiles.push({
             sprite: ev.projectile,
             x: a.x + 32, y: a.y - 64,
-            tx: t.x + 32, ty: t.y - 64,
+            tx, ty,
             flip: a.side === 1,
             target: ev.target,
             hit: ev.hit,
             damage: ev.damage,
             t: 0,
           });
+          log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}` : `${a.def_id} misses ${t.def_id}`);
         } else {
           // melee lunge
           const dir = a.side === 0 ? 1 : -1;
@@ -306,7 +317,6 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
       if (p.t >= 1) {
         const tgt = spritesById.get(p.target);
         if (tgt && p.hit) { tgt.flashUntil = now + 250; tgt.shake = 8; setTimeout(() => tgt.shake = 0, 220); }
-        log(p.hit ? `ranged hits for ${p.damage}` : `ranged misses`);
         return false;
       }
       p.x = p.x + (p.tx - p.x) * 0.05;

@@ -204,7 +204,7 @@ mod tests {
         }];
         let mut rng = StdRng::seed_from_u64(1);
 
-        equip_ai_items(&mut team, 30, &mut rng);
+        equip_ai_items(&mut team, 100, &mut rng);
 
         assert_eq!(team[0].right_hand.as_deref(), Some("pickle_rick"));
     }

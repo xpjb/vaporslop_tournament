@@ -22,6 +22,14 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![],
         },
         CharacterDef {
+            id: "omniscronchulon".into(),
+            name: "Omniscronchulon".into(),
+            sprite: "omniscronchulon.webp".into(),
+            cost: 160,
+            might: 12, reflexes: 15, wisdom: 5, hp: 25,
+            properties: vec![MeleeCleave { count: 2 }],
+        },
+        CharacterDef {
             id: "azul_picardia".into(),
             name: "Azul Picardia".into(),
             sprite: "azul_picardia.webp".into(),
@@ -60,6 +68,14 @@ fn build_character_defs() -> Vec<CharacterDef> {
             cost: 60,
             might: 8, reflexes: 12, wisdom: 1, hp: 20,
             properties: vec![SummonOnEnemyDeath { species: "vegetal".into() }],
+        },
+        CharacterDef {
+            id: "dark_vegetal".into(),
+            name: "Dark Vegetal".into(),
+            sprite: "dark_vegetal.webp".into(),
+            cost: 60,
+            might: 8, reflexes: 12, wisdom: 1, hp: 20,
+            properties: vec![SummonOnAllyDeath { species: "dark_vegetal".into() }],
         },
         CharacterDef {
             id: "orang".into(),

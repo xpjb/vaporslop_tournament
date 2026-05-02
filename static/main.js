@@ -11,11 +11,23 @@ const state = {
   run: null,
   pendingItem: null, // shop item slot waiting for team target
   lastBattle: null,
+  battleAnimating: false,
 };
 
 function show(screenId) {
   $$(".screen").forEach((s) => s.classList.add("hidden"));
   $(`#${screenId}`).classList.remove("hidden");
+  syncRunHudVisibility();
+}
+
+/** HUD is outside individual screens so wins/losses stay visible during battle playback. */
+function syncRunHudVisibility() {
+  const hud = $("#runHud");
+  if (!hud) return;
+  const r = state.run;
+  const shopOn = $("#shop") && !$("#shop").classList.contains("hidden");
+  const battleOn = $("#battle") && !$("#battle").classList.contains("hidden");
+  hud.classList.toggle("hidden", !(r && (shopOn || battleOn)));
 }
 
 function connect() {
@@ -45,12 +57,25 @@ function handleServer(msg) {
       break;
     case "battle":
       state.lastBattle = msg;
+      // Authoritative post-fight snapshot (same payload the server persists right after).
+      if (state.run) {
+        Object.assign(state.run, {
+          phase: msg.phase,
+          wins: msg.wins,
+          losses: msg.losses,
+          streak: msg.streak,
+          alive: msg.alive,
+          money: msg.money_after,
+        });
+      }
       show("battle");
       $("#leftName").textContent = state.run?.name ?? "you";
       $("#rightName").textContent = msg.opponent_name;
       $("#nextRoundBtn").classList.add("hidden");
       $("#battleLog").innerHTML = "";
+      state.battleAnimating = true;
       playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
+        state.battleAnimating = false;
         const log = (t) => {
           const d = document.createElement("div");
           d.textContent = t; $("#battleLog").appendChild(d); $("#battleLog").scrollTop = 1e9;
@@ -58,7 +83,21 @@ function handleServer(msg) {
         if (msg.winner === 0) log(`✦ you win — +$${state.consts.win_reward}`);
         else if (msg.winner === 1) log(`✗ defeat — +$${state.consts.lose_reward}`);
         else log(`— draw —`);
-        $("#nextRoundBtn").classList.remove("hidden");
+        if (state.lastBattle && state.run) {
+          const m = state.lastBattle;
+          Object.assign(state.run, {
+            phase: m.phase,
+            wins: m.wins,
+            losses: m.losses,
+            streak: m.streak,
+            alive: m.alive,
+            money: m.money_after,
+          });
+        }
+        if (state.run?.phase !== "game_over") {
+          $("#nextRoundBtn").classList.remove("hidden");
+        }
+        renderRun();
       }, {
         showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
         hideTooltip,
@@ -184,6 +223,8 @@ function propertyText(p) {
     case "healer": return "healer";
     case "freeze_on_hit": return `freeze on hit: ${escape(p.sprite)}`;
     case "summon_on_enemy_death": return `summons ${escape(p.species)} on enemy death`;
+    case "summon_on_ally_death": return `summons ${escape(p.species)} on ally death`;
+    case "melee_cleave": return `melee hits front ${escape(String(p.count))} enemies`;
     case "stat_bonus": {
       const parts = STAT_KEYS
         .map(({ key, label }) => p[key] ? `${label} ${signed(p[key])}` : null)
@@ -304,12 +345,17 @@ function renderRun() {
   $("#hudStreak").textContent = r.streak;
 
   if (r.phase === "game_over") {
+    if (state.battleAnimating) {
+      syncRunHudVisibility();
+      return;
+    }
     $("#goWins").textContent = r.wins;
     show("gameover");
     return;
   }
   if (r.phase === "battle") {
-    // Wait for client to acknowledge battle screen.
+    // Stay on battle replay until "continue"; still refresh HUD numbers above.
+    syncRunHudVisibility();
     return;
   }
   show("shop");

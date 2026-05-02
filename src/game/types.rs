@@ -17,6 +17,9 @@ pub enum Property {
     Healer,
     FreezeOnHit { sprite: String },
     SummonOnEnemyDeath { species: String },
+    SummonOnAllyDeath { species: String },
+    /// Melee only: hit the first `count` living enemies in formation order per swing.
+    MeleeCleave { count: u8 },
     StatBonus { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
 }
 

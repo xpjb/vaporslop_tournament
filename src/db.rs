@@ -1,10 +1,13 @@
-use crate::game::shop::random_build;
+use crate::game::shop::ai_ladder_build;
 use crate::game::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::seq::SliceRandom;
 use rusqlite::{params, Connection};
 use std::sync::Arc;
+
+const AI_LADDER_STEPS: usize = 100;
+const AI_LADDER_GROWTH: f32 = 1.05;
 
 #[derive(Clone)]
 pub struct Db {
@@ -46,18 +49,17 @@ impl Db {
     fn maybe_seed(&self) -> Result<()> {
         let count: i64 = self.conn.lock().query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
         if count > 0 { return Ok(()); }
-        let mut rng = rand::thread_rng();
         let names = ["aesthet1c", "vapor", "moonbeam", "y2k", "memehead", "cybr", "lofi", "pix3l", "tokr", "dolphin", "neon", "glitch"];
-        for _ in 0..30 {
-            let name = format!("{}_bot", names[rng.gen_range(0..names.len())]);
-            let target = rng.gen_range(50..=400);
-            let build = random_build(target);
+        let mut target = STARTING_MONEY as f32;
+        for i in 0..AI_LADDER_STEPS {
+            let name = format!("{}_bot_{:03}", names[i % names.len()], i + 1);
+            let build = ai_ladder_build(target.round() as i32);
             let cost = build.cost_value();
             let run = Run {
                 id: uuid::Uuid::new_v4().to_string(),
                 name,
                 money: 0,
-                wins: rng.gen_range(0..3),
+                wins: 0,
                 losses: 0,
                 streak: 0,
                 alive: true,
@@ -66,6 +68,7 @@ impl Db {
                 phase: Phase::Shop,
             };
             self.upsert_run(&run, cost)?;
+            target *= AI_LADDER_GROWTH;
         }
         Ok(())
     }
@@ -115,16 +118,17 @@ impl Db {
         } else { Ok(None) }
     }
 
-    /// Find a matchup near the run's lifetime gold, including the run itself.
-    pub fn find_opponent(&self, target_lifetime_gold: i32) -> Result<Option<(String, String, Build)>> {
+    /// Find a matchup whose actual build cost is near the requested gold budget.
+    pub fn find_opponent(&self, current_run_id: &str, target_cost: i32) -> Result<Option<(String, String, Build)>> {
         let conn = self.conn.lock();
+        let band = ((target_cost as f32) * 0.05).ceil().max(1.0) as i32;
+        let min_cost = (target_cost - band).max(0);
+        let max_cost = target_cost + band;
         let mut stmt = conn.prepare(
             "SELECT id,name,build_json FROM runs
-             ORDER BY ABS((?2 + wins * ?3 + losses * ?4) - ?1) ASC
-             LIMIT 10"
+             WHERE id != ?1 AND cost_value BETWEEN ?2 AND ?3"
         )?;
-        let mut rows = stmt.query(params![target_lifetime_gold, STARTING_MONEY, WIN_REWARD, LOSE_REWARD])?;
-        // Pick a random one of the top 10 to avoid always playing the same opponent.
+        let mut rows = stmt.query(params![current_run_id, min_cost, max_cost])?;
         let mut candidates: Vec<(String, String, Build)> = vec![];
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
@@ -133,10 +137,29 @@ impl Db {
             let build: Build = serde_json::from_str(&bjson)?;
             if !build.team.is_empty() { candidates.push((id, name, build)); }
         }
-        if candidates.is_empty() { return Ok(None); }
         let mut rng = rand::thread_rng();
-        let idx = rng.gen_range(0..candidates.len().min(5));
-        Ok(Some(candidates.into_iter().nth(idx).unwrap()))
+        if let Some(candidate) = candidates.choose(&mut rng).cloned() {
+            return Ok(Some(candidate));
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id,name,build_json FROM runs
+             WHERE id != ?1
+             ORDER BY ABS(cost_value - ?2) ASC
+             LIMIT 10"
+        )?;
+        let mut rows = stmt.query(params![current_run_id, target_cost])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let bjson: String = row.get(2)?;
+            let build: Build = serde_json::from_str(&bjson)?;
+            if !build.team.is_empty() {
+                return Ok(Some((id, name, build)));
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn record_streak(&self, name: &str, streak: i32, wins: i32) -> Result<()> {
@@ -153,5 +176,68 @@ impl Db {
         let mut stmt = conn.prepare("SELECT name,streak,wins FROM leaderboard ORDER BY streak DESC, wins DESC LIMIT 20")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Db {
+        Db::open(":memory:").unwrap()
+    }
+
+    fn run_with_build(id: &str, name: &str, build: Build) -> Run {
+        Run {
+            id: id.to_string(),
+            name: name.to_string(),
+            money: 0,
+            wins: 0,
+            losses: 0,
+            streak: 0,
+            alive: true,
+            build,
+            shop: Shop::default(),
+            phase: Phase::Shop,
+        }
+    }
+
+    fn one_member_build(def_id: &str) -> Build {
+        Build {
+            team: vec![TeamMember {
+                def_id: def_id.to_string(),
+                hat: None,
+                left_hand: None,
+                right_hand: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn seeds_one_hundred_ladder_runs() {
+        let db = test_db();
+        let count: i64 = db.conn.lock()
+            .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, AI_LADDER_STEPS as i64);
+    }
+
+    #[test]
+    fn find_opponent_excludes_current_run() {
+        let db = test_db();
+        db.conn.lock().execute("DELETE FROM runs", []).unwrap();
+
+        let current = run_with_build("current", "current", one_member_build("orang"));
+        db.upsert_run(&current, current.build.cost_value()).unwrap();
+
+        assert!(db.find_opponent(&current.id, current.build.cost_value()).unwrap().is_none());
+
+        let opponent = run_with_build("opponent", "opponent", one_member_build("azul_picardia"));
+        db.upsert_run(&opponent, opponent.build.cost_value()).unwrap();
+        let far = run_with_build("far", "far", one_member_build("elephoont"));
+        db.upsert_run(&far, far.build.cost_value()).unwrap();
+
+        let found = db.find_opponent(&current.id, current.build.cost_value()).unwrap().unwrap();
+        assert_eq!(found.0, "opponent");
     }
 }

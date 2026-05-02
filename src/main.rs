@@ -13,7 +13,7 @@ use axum::{
 use db::Db;
 use game::combat::resolve_battle;
 use game::data::*;
-use game::shop::roll_shop;
+use game::shop::{ai_ladder_build, roll_shop};
 use game::types::*;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -287,16 +287,13 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
         ClientMsg::Battle => {
             if run.phase != Phase::Shop { return Err("not in shop".into()); }
             if run.build.team.is_empty() { return Err("no team".into()); }
-            let target_lifetime_gold = lifetime_gold_earned(run);
-            let opponent = state.db.find_opponent(target_lifetime_gold).map_err(|e| e.to_string())?;
+            let target_gold = total_earned_gold(run);
+            let opponent = state.db.find_opponent(&run.id, target_gold).map_err(|e| e.to_string())?;
             let (op_name, op_build_raw) = match opponent {
                 Some((_id, name, b)) => (name, b),
-                None => ("ghost".to_string(), game::shop::random_build(target_lifetime_gold.max(50))),
+                None => ("ghost".to_string(), ai_ladder_build(target_gold.max(50))),
             };
-            // Reverse opponent's team so their stored team[0] (their front) appears
-            // on the far side of the right team, matching mirrored UI orientation.
-            let op_build = Build { team: op_build_raw.team.into_iter().rev().collect() };
-            let res = resolve_battle(&run.build, &op_build);
+            let res = resolve_battle(&run.build, &op_build_raw);
             let won = res.winner == Some(0);
             if won {
                 run.money += WIN_REWARD;
@@ -336,7 +333,7 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
     }
 }
 
-fn lifetime_gold_earned(run: &Run) -> i32 {
+fn total_earned_gold(run: &Run) -> i32 {
     STARTING_MONEY + run.wins * WIN_REWARD + run.losses * LOSE_REWARD
 }
 

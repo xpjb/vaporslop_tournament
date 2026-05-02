@@ -17,33 +17,195 @@ pub fn roll_shop() -> Shop {
     shop
 }
 
-/// Generate a random build at roughly the given target cost (best-effort).
-pub fn random_build(target_cost: i32) -> Build {
+/// Generate an AI build for a target gold budget using light combat heuristics.
+pub fn ai_ladder_build(target_cost: i32) -> Build {
     let mut rng = rand::thread_rng();
     let mut spent = 0;
     let mut team: Vec<TeamMember> = vec![];
     let chars: Vec<&CharacterDef> = character_defs().iter().collect();
-    let items_hat: Vec<&ItemDef> = item_defs().iter().filter(|i| i.slot == ItemSlot::Hat).collect();
-    let items_lh: Vec<&ItemDef> = item_defs().iter().filter(|i| i.slot == ItemSlot::LeftHand).collect();
-    let items_rh: Vec<&ItemDef> = item_defs().iter().filter(|i| i.slot == ItemSlot::RightHand).collect();
 
     while team.len() < MAX_TEAM && spent < target_cost {
         let remaining = target_cost - spent;
-        let affordable: Vec<&&CharacterDef> = chars.iter().filter(|c| c.cost <= remaining + 30).collect();
-        if affordable.is_empty() { break; }
-        let pick = affordable.choose(&mut rng).unwrap();
+        let affordable: Vec<&CharacterDef> = chars
+            .iter()
+            .copied()
+            .filter(|c| c.cost <= remaining)
+            .collect();
+        if affordable.is_empty() {
+            break;
+        }
+
+        let needs_front = !team.iter().any(is_frontline_member);
+        let prefer_backline = !needs_front && rng.gen_bool(0.65);
+        let mut pool: Vec<&CharacterDef> = affordable
+            .iter()
+            .copied()
+            .filter(|c| {
+                if needs_front {
+                    is_frontline_def(c)
+                } else if prefer_backline {
+                    is_backline_def(c)
+                } else {
+                    is_frontline_def(c)
+                }
+            })
+            .collect();
+        if pool.is_empty() {
+            pool = affordable;
+        }
+
+        pool.sort_by_key(|c| if is_frontline_def(c) { front_score(c) } else { back_score(c) });
+        pool.reverse();
+        let pick_pool_len = pool.len().min(3);
+        let pick = pool[..pick_pool_len].choose(&mut rng).unwrap();
         spent += pick.cost;
-        let mut m = TeamMember { def_id: pick.id.clone(), hat: None, left_hand: None, right_hand: None };
-        if rng.gen_bool(0.4) {
-            if let Some(it) = items_hat.choose(&mut rng) { m.hat = Some(it.id.clone()); spent += it.cost; }
-        }
-        if rng.gen_bool(0.3) {
-            if let Some(it) = items_lh.choose(&mut rng) { m.left_hand = Some(it.id.clone()); spent += it.cost; }
-        }
-        if rng.gen_bool(0.3) {
-            if let Some(it) = items_rh.choose(&mut rng) { m.right_hand = Some(it.id.clone()); spent += it.cost; }
-        }
-        team.push(m);
+        team.push(TeamMember { def_id: pick.id.clone(), hat: None, left_hand: None, right_hand: None });
     }
+
+    arrange_ai_team(&mut team);
+    equip_ai_items(&mut team, target_cost - spent, &mut rng);
+    arrange_ai_team(&mut team);
+
     Build { team }
+}
+
+fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut impl Rng) {
+    if remaining <= 0 {
+        return;
+    }
+
+    loop {
+        let mut candidates: Vec<(usize, &ItemDef, i32)> = vec![];
+        for (member_idx, member) in team.iter().enumerate() {
+            let Some(def) = character_def(&member.def_id) else { continue; };
+            let wants_wisdom = is_backline_def(def);
+            for item in item_defs().iter() {
+                if item.cost <= remaining && can_equip_item(member, item) {
+                    candidates.push((member_idx, item, item_fit_score(item, wants_wisdom)));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            break;
+        }
+
+        candidates.sort_by_key(|(_, item, score)| (*score, item.cost));
+        candidates.reverse();
+        let pick_pool_len = candidates.len().min(3);
+        let (member_idx, item, _) = candidates[..pick_pool_len].choose(rng).unwrap();
+        equip_item(&mut team[*member_idx], item);
+        remaining -= item.cost;
+    }
+}
+
+fn can_equip_item(member: &TeamMember, item: &ItemDef) -> bool {
+    match item.slot {
+        ItemSlot::Hat => member.hat.is_none(),
+        ItemSlot::LeftHand | ItemSlot::RightHand => member.left_hand.is_none() || member.right_hand.is_none(),
+    }
+}
+
+fn equip_item(member: &mut TeamMember, item: &ItemDef) {
+    match item.slot {
+        ItemSlot::Hat => member.hat = Some(item.id.clone()),
+        ItemSlot::LeftHand => {
+            if member.left_hand.is_none() {
+                member.left_hand = Some(item.id.clone());
+            } else {
+                member.right_hand = Some(item.id.clone());
+            }
+        }
+        ItemSlot::RightHand => {
+            if member.right_hand.is_none() {
+                member.right_hand = Some(item.id.clone());
+            } else {
+                member.left_hand = Some(item.id.clone());
+            }
+        }
+    }
+}
+
+fn arrange_ai_team(team: &mut [TeamMember]) {
+    team.sort_by_key(|m| {
+        let Some(def) = character_def(&m.def_id) else { return 0; };
+        if is_frontline_def(def) {
+            10_000 + front_score(def)
+        } else {
+            back_score(def)
+        }
+    });
+    team.reverse();
+}
+
+fn is_frontline_member(member: &TeamMember) -> bool {
+    character_def(&member.def_id).map(is_frontline_def).unwrap_or(false)
+}
+
+fn is_frontline_def(def: &CharacterDef) -> bool {
+    !def.properties.iter().any(|p| matches!(p, Property::Ranged { .. } | Property::Healer))
+}
+
+fn is_backline_def(def: &CharacterDef) -> bool {
+    def.properties.iter().any(|p| matches!(p, Property::Ranged { .. } | Property::Healer))
+}
+
+fn front_score(def: &CharacterDef) -> i32 {
+    def.hp * 3 + def.might * 8 + def.reflexes * 2
+}
+
+fn back_score(def: &CharacterDef) -> i32 {
+    def.wisdom * 8 + def.reflexes * 2 + def.hp
+}
+
+fn item_fit_score(item: &ItemDef, wants_wisdom: bool) -> i32 {
+    item.properties.iter().map(|p| match p {
+        Property::StatBonus { might, reflexes, wisdom, hp } => {
+            if wants_wisdom {
+                wisdom * 8 + reflexes * 2 + hp + might
+            } else {
+                hp * 3 + might * 8 + reflexes * 2 + wisdom
+            }
+        }
+        _ => 10,
+    }).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    #[test]
+    fn ai_ladder_build_puts_backline_behind_frontline() {
+        for _ in 0..25 {
+            let build = ai_ladder_build(700);
+            assert!(!build.team.is_empty());
+
+            let first_backline = build.team.iter().position(|m| {
+                character_def(&m.def_id).map(is_backline_def).unwrap_or(false)
+            });
+            let last_frontline = build.team.iter().rposition(is_frontline_member);
+
+            if let (Some(first_backline), Some(last_frontline)) = (first_backline, last_frontline) {
+                assert!(last_frontline < first_backline);
+            }
+        }
+    }
+
+    #[test]
+    fn ai_item_packer_spends_leftover_cash_on_affordable_items() {
+        let mut team = vec![TeamMember {
+            def_id: "vegetal".into(),
+            hat: None,
+            left_hand: None,
+            right_hand: None,
+        }];
+        let mut rng = StdRng::seed_from_u64(1);
+
+        equip_ai_items(&mut team, 30, &mut rng);
+
+        assert_eq!(team[0].right_hand.as_deref(), Some("pickle_rick"));
+    }
 }

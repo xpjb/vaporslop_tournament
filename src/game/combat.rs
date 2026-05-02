@@ -143,9 +143,11 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
             let actors = unsafe { &mut *actors };
             let foes = unsafe { &mut *foes };
 
-            // Iterate by index since we mutate alongside.
-            let actor_count = actors.len();
-            for i in 0..actor_count {
+            // Iterate over the actors that existed at tick start; summons join the
+            // formation immediately, but don't act until the next tick.
+            let actor_uids: Vec<u32> = actors.iter().map(|c| c.uid).collect();
+            for actor_uid in actor_uids {
+                let Some(i) = actors.iter().position(|c| c.uid == actor_uid) else { continue; };
                 if actors[i].hp <= 0 { continue; }
                 if actors[i].frozen_turns > 0 {
                     actors[i].frozen_turns -= 1;
@@ -247,7 +249,11 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                                 summoner: summoner_uid,
                                 combatant: s.clone(),
                             });
-                            actors.push(s);
+                            if let Some(idx) = actors.iter().position(|c| c.uid == summoner_uid) {
+                                actors.insert(idx, s);
+                            } else {
+                                actors.push(s);
+                            }
                         }
                     }
                 }

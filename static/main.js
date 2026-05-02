@@ -236,6 +236,16 @@ function statBonusFromProperties(properties = []) {
   return bonus;
 }
 
+function statParts(p) {
+  const values = STAT_KEYS.map(({ key }) => p[key] || 0);
+  if (values.every((v) => v === values[0]) && values[0] !== 0) {
+    return [`all stats ${signed(values[0])}`];
+  }
+  return STAT_KEYS
+    .map(({ key, label }) => (p[key] ? `${label} ${signed(p[key])}` : null))
+    .filter(Boolean);
+}
+
 function memberItems(member) {
   return SOCKETS
     .map(({ key }) => ({ key, item: member?.[key] ? itemDef(member[key]) : null }))
@@ -257,13 +267,11 @@ function effectiveStats(member) {
 function propertyText(p) {
   switch (p.kind) {
     case "stat_bonus": {
-      const parts = STAT_KEYS
-        .map(({ key, label }) => (p[key] ? `${label} ${signed(p[key])}` : null))
-        .filter(Boolean);
+      const parts = statParts(p);
       return parts.length ? parts.join(", ") : "no stat bonus";
     }
     case "ranged": return "ranged attack";
-    case "healer": return "healer";
+    case "healer": return "heals allies for wisdom";
     case "freeze_on_hit": return "freezes on hit";
     case "summon_on_enemy_death": return `summon ${escape(p.species)} when an enemy dies`;
     case "summon_on_ally_death": return `summon ${escape(p.species)} when an ally dies`;
@@ -272,11 +280,14 @@ function propertyText(p) {
     );
     case "crit_strike": return `${escape(String(p.chance_percent))}% critical strike (double damage)`;
     case "revive_once": return "revive once at full HP";
-    case "melee_cleave": return `melee hits front ${escape(String(p.count))} enemies`;
+    case "melee_cleave": {
+      const n = Number(p.count);
+      if (n >= 8) return "melee hits all enemies in formation";
+      return `melee hits front ${escape(String(p.count))} enemies`;
+    }
+    case "melee_from_second": return "melee from second formation slot (overrides ranged)";
     case "buff_formation_front": {
-      const parts = STAT_KEYS
-        .map(({ key, label }) => (p[key] ? `${label} ${signed(p[key])}` : null))
-        .filter(Boolean);
+      const parts = statParts(p);
       const bonus = parts.length ? parts.join(", ") : "stats";
       return (
         `front ally gets ${bonus} while this unit lives`
@@ -334,14 +345,12 @@ function memberTooltip(member) {
   const itemRows = items.length
     ? items.map(({ key, item }) => `<div class="tooltip-equipped">${itemIcon(item, SLOT_LABELS[key])}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>`).join("")
     : `<div class="tooltip-empty">no equipped items</div>`;
-  const nonStatItemProps = items.flatMap(({ item }) => item.properties.filter((p) => p.kind !== "stat_bonus"));
-  const combinedProps = [...(cd.properties || []), ...nonStatItemProps];
   return `<div class="tooltip-title">${escape(cd.name)}</div>
     <div class="tooltip-meta">$${cd.cost} · equipped value $${items.reduce((sum, { item }) => sum + item.cost, cd.cost)}</div>
     <div class="tooltip-hero"><img src="/assets/${escape(cd.sprite)}" alt="${escape(cd.name)}" /></div>
     ${statGrid(stats.base, stats.total)}
-    <div class="tooltip-section">active properties</div>
-    ${propertyList(combinedProps)}
+    <div class="tooltip-section">unit properties</div>
+    ${propertyList(cd.properties || [])}
     <div class="tooltip-section">equipped items</div>
     ${itemRows}`;
 }
@@ -394,8 +403,8 @@ function combatantTooltip(c) {
     ${statGrid(base, total, Math.max(0, c.hp || 0))}
     ${formationFrontAuraTooltipSection(c)}
   ${c.revive_charges ? `<div class="tooltip-section">resurrection</div><div>${escape(String(c.revive_charges))} charge${c.revive_charges === 1 ? "" : "s"} remaining</div>` : ""}
-    <div class="tooltip-section">active properties</div>
-    ${propertyList(c.properties || [])}
+    <div class="tooltip-section">unit properties</div>
+    ${propertyList(cd?.properties || [])}
     <div class="tooltip-section">equipped items</div>
     ${itemRows}`;
 }
@@ -558,18 +567,26 @@ function getDrag(e) {
     return null;
   }
 }
-function itemSocketId(key) {
-  return key === "hat" ? "hat" : key === "left_hand" ? "left_hand" : "right_hand";
+function itemSocketId(slot) {
+  if (slot === "hat") return "hat";
+  return "hand";
 }
 function slotAccepts(targetSlot, itemSlot) {
   if (itemSlot === "hat") return targetSlot === "hat";
-  return targetSlot === "left_hand" || targetSlot === "right_hand";
+  if (itemSlot === "hand") return targetSlot === "left_hand" || targetSlot === "right_hand";
+  if (itemSlot === "left_hand" || itemSlot === "right_hand") {
+    return targetSlot === "left_hand" || targetSlot === "right_hand";
+  }
+  return false;
 }
 function firstFreeSlot(member, itemSlot) {
   if (!member) return null;
   if (itemSlot === "hat") return member.hat ? null : "hat";
-  if (!member.left_hand) return "left_hand";
-  if (!member.right_hand) return "right_hand";
+  if (itemSlot === "hand" || itemSlot === "left_hand" || itemSlot === "right_hand") {
+    if (!member.left_hand) return "left_hand";
+    if (!member.right_hand) return "right_hand";
+    return null;
+  }
   return null;
 }
 function renderItemSockets(teamIdx, member) {

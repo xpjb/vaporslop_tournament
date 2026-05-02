@@ -26,9 +26,19 @@ pub enum Property {
     ReviveOnce,
     /// Melee only: hit the first `count` living enemies in formation order per swing.
     MeleeCleave { count: u8 },
+    /// May melee (might-based) from the second living formation slot; overrides `Ranged` there.
+    MeleeFromSecond,
     StatBonus { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
     /// While alive, adds these stats to the ally in formation front (first living slot).
     BuffFormationFront { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
+}
+
+/// Where an item may be equipped (character still has two distinct hand sockets).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GearSlot {
+    Hat,
+    Hand,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,7 +68,7 @@ pub struct ItemDef {
     pub name: String,
     pub sprite: String,
     pub cost: i32,
-    pub slot: ItemSlot,
+    pub slot: GearSlot,
     pub properties: Vec<Property>,
 }
 

@@ -272,6 +272,24 @@ fn first_alive_idx(team: &[Combatant]) -> Option<usize> {
     team.iter().position(|c| c.hp > 0)
 }
 
+/// 0 = front (first living in formation order), 1 = second living, etc.
+fn formation_alive_rank(team: &[Combatant], idx: usize) -> Option<usize> {
+    if idx >= team.len() || team[idx].hp <= 0 {
+        return None;
+    }
+    let mut rank = 0usize;
+    for (j, c) in team.iter().enumerate() {
+        if c.hp <= 0 {
+            continue;
+        }
+        if j == idx {
+            return Some(rank);
+        }
+        rank += 1;
+    }
+    None
+}
+
 fn first_damaged_idx(team: &[Combatant], excluding: u32) -> Option<usize> {
     team.iter().enumerate()
         .filter(|(_, c)| c.hp > 0 && c.hp < effective_max_hp(c) && c.uid != excluding)
@@ -478,7 +496,16 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                         actors[i].frozen_turns -= 1;
                         continue;
                     }
-                    let is_front = first_alive_idx(actors) == Some(i);
+                    let rank = formation_alive_rank(actors, i);
+                    let has_melee_from_second = actors[i]
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, Property::MeleeFromSecond));
+                    let can_melee = match rank {
+                        Some(0) => true,
+                        Some(1) => has_melee_from_second,
+                        _ => false,
+                    };
                     let has_ranged = actors[i].properties.iter().any(|p| matches!(p, Property::Ranged { .. }));
                     let is_healer = actors[i].properties.iter().any(|p| matches!(p, Property::Healer));
 
@@ -498,9 +525,9 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                         }
                     }
 
-                    // Attack: front=melee, non-front+ranged=ranged, otherwise no action.
+                    // Attack: first rank or (second rank with reach)=melee; else ranged if able.
                     if first_alive_idx(foes).is_none() { break; }
-                    let (ranged, projectile, damage_stat) = if is_front {
+                    let (ranged, projectile, damage_stat) = if can_melee {
                         (false, None, actors[i].might)
                     } else if has_ranged {
                         let proj = actors[i].properties.iter().find_map(|p| {
@@ -512,13 +539,18 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                     };
 
                     let cleave_count = if !ranged {
-                        actors[i].properties.iter().find_map(|p| {
-                            if let Property::MeleeCleave { count } = p {
-                                Some((*count).max(1) as usize)
-                            } else {
-                                None
-                            }
-                        }).unwrap_or(1)
+                        actors[i]
+                            .properties
+                            .iter()
+                            .filter_map(|p| {
+                                if let Property::MeleeCleave { count } = p {
+                                    Some((*count).max(1) as usize)
+                                } else {
+                                    None
+                                }
+                            })
+                            .max()
+                            .unwrap_or(1)
                     } else {
                         1
                     };

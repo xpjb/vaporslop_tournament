@@ -244,18 +244,15 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
             }
             let member = run.build.team.get_mut(target).ok_or("no such team member")?;
             match def.slot {
-                ItemSlot::Hat => { if member.hat.is_some() { return Err("hat slot taken".into()); } member.hat = Some(id); }
-                ItemSlot::LeftHand | ItemSlot::RightHand => {
-                    // Hand items fill the matching hand first, falling back to the other hand.
-                    let prefer_left = def.slot == ItemSlot::LeftHand;
-                    let (first, second) = if prefer_left {
-                        (&mut member.left_hand, &mut member.right_hand)
+                GearSlot::Hat => { if member.hat.is_some() { return Err("hat slot taken".into()); } member.hat = Some(id); }
+                GearSlot::Hand => {
+                    if member.left_hand.is_none() {
+                        member.left_hand = Some(id);
+                    } else if member.right_hand.is_none() {
+                        member.right_hand = Some(id);
                     } else {
-                        (&mut member.right_hand, &mut member.left_hand)
-                    };
-                    if first.is_none() { *first = Some(id); }
-                    else if second.is_none() { *second = Some(id); }
-                    else { return Err("both hands full".into()); }
+                        return Err("both hands full".into());
+                    }
                 }
             }
             run.money -= def.cost;
@@ -437,10 +434,10 @@ fn member_item_slot_mut(member: &mut TeamMember, slot: ItemSlot) -> &mut Option<
     }
 }
 
-fn slot_accepts(target: ItemSlot, item: ItemSlot) -> bool {
+fn slot_accepts(target: ItemSlot, item: GearSlot) -> bool {
     match item {
-        ItemSlot::Hat => target == ItemSlot::Hat,
-        ItemSlot::LeftHand | ItemSlot::RightHand => {
+        GearSlot::Hat => target == ItemSlot::Hat,
+        GearSlot::Hand => {
             target == ItemSlot::LeftHand || target == ItemSlot::RightHand
         }
     }

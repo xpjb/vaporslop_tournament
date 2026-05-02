@@ -101,26 +101,19 @@ fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut impl Rn
 
 fn can_equip_item(member: &TeamMember, item: &ItemDef) -> bool {
     match item.slot {
-        ItemSlot::Hat => member.hat.is_none(),
-        ItemSlot::LeftHand | ItemSlot::RightHand => member.left_hand.is_none() || member.right_hand.is_none(),
+        GearSlot::Hat => member.hat.is_none(),
+        GearSlot::Hand => member.left_hand.is_none() || member.right_hand.is_none(),
     }
 }
 
 fn equip_item(member: &mut TeamMember, item: &ItemDef) {
     match item.slot {
-        ItemSlot::Hat => member.hat = Some(item.id.clone()),
-        ItemSlot::LeftHand => {
+        GearSlot::Hat => member.hat = Some(item.id.clone()),
+        GearSlot::Hand => {
             if member.left_hand.is_none() {
                 member.left_hand = Some(item.id.clone());
             } else {
                 member.right_hand = Some(item.id.clone());
-            }
-        }
-        ItemSlot::RightHand => {
-            if member.right_hand.is_none() {
-                member.right_hand = Some(item.id.clone());
-            } else {
-                member.left_hand = Some(item.id.clone());
             }
         }
     }
@@ -213,6 +206,6 @@ mod tests {
 
         equip_ai_items(&mut team, 100, &mut rng);
 
-        assert_eq!(team[0].right_hand.as_deref(), Some("pickle_rick"));
+        assert_eq!(team[0].left_hand.as_deref(), Some("spear"));
     }
 }

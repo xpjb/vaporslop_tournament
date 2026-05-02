@@ -419,32 +419,49 @@ fn handle_foe_killed(
     let dead_def = foes[foe_idx].def_id.clone();
     let dead_side = foes[foe_idx].side;
     events.push(CombatEvent::Death { uid: dead_uid, side: dead_side });
-    apply_might_on_ally_death(foes, events);
+    apply_ally_death_bonuses(foes, events);
     summon_on_enemy_death(actors, &dead_def, attacker_side, events, uid_counter);
     summon_on_ally_death(foes, &dead_def, dead_side, events, uid_counter);
 }
 
 /// Apply item effects that trigger when an ally dies (`foes` is that ally's team).
-fn apply_might_on_ally_death(foes: &mut [Combatant], events: &mut Vec<CombatEvent>) {
+fn apply_ally_death_bonuses(foes: &mut [Combatant], events: &mut Vec<CombatEvent>) {
     for c in foes.iter_mut() {
         if c.hp <= 0 {
             continue;
         }
-        let gain: i32 = c
-            .properties
-            .iter()
-            .filter_map(|p| {
-                if let Property::MightOnAllyDeath { might } = p {
-                    Some(*might)
-                } else {
-                    None
+        let mut dm = 0i32;
+        let mut dr = 0i32;
+        let mut dw = 0i32;
+        let mut dhp = 0i32;
+        for p in &c.properties {
+            match p {
+                Property::MightOnAllyDeath { might } => dm += *might,
+                Property::StatsOnAllyDeath {
+                    might: m,
+                    reflexes: r,
+                    wisdom: w,
+                    hp: h,
+                } => {
+                    dm += *m;
+                    dr += *r;
+                    dw += *w;
+                    dhp += *h;
                 }
-            })
-            .sum();
-        if gain == 0 {
+                _ => {}
+            }
+        }
+        if dm == 0 && dr == 0 && dw == 0 && dhp == 0 {
             continue;
         }
-        c.might += gain;
+        c.might += dm;
+        c.reflexes += dr;
+        c.wisdom += dw;
+        c.max_hp += dhp;
+        if dhp != 0 {
+            let cap = effective_max_hp(c);
+            c.hp = (c.hp + dhp).clamp(0, cap);
+        }
         events.push(CombatEvent::StatSync {
             uid: c.uid,
             might: c.might,

@@ -156,6 +156,19 @@ fn build_item_defs() -> Vec<ItemDef> {
             properties: vec![Property::ReviveOnce],
         },
         ItemDef {
+            id: "hussar_hat".into(),
+            name: "Hussar Hat".into(),
+            sprite: "hathussar.png".into(),
+            cost: 50,
+            slot: GearSlot::Hat,
+            properties: vec![Property::StatsOnAllyDeath {
+                might: 1,
+                reflexes: 1,
+                wisdom: 1,
+                hp: 1,
+            }],
+        },
+        ItemDef {
             id: "pickle_rick".into(),
             name: "Pickle Rick".into(),
             sprite: "Pickle_rick_transparent_edgetrimmed.webp".into(),

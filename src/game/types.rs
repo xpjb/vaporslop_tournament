@@ -20,6 +20,13 @@ pub enum Property {
     SummonOnAllyDeath { species: String },
     /// Living wearer gains this much might each time an ally on the same side dies.
     MightOnAllyDeath { might: i32 },
+    /// Living wearer gains these stats (and `hp` to max HP and current HP, capped) each time an ally on the same side dies.
+    StatsOnAllyDeath {
+        might: i32,
+        reflexes: i32,
+        wisdom: i32,
+        hp: i32,
+    },
     /// On each damaging hit, chance_percent roll (0–100) to deal double damage.
     CritStrike { chance_percent: u8 },
     /// Once per battle, when HP reaches 0, revive at full effective HP (charges tracked at runtime).

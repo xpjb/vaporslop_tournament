@@ -278,6 +278,11 @@ function propertyText(p) {
     case "might_on_ally_death": return (
       `when an ally dies: might ${signed(p.might)} for this battle`
     );
+    case "stats_on_ally_death": {
+      const parts = statParts(p);
+      const s = parts.length ? parts.join(", ") : "stats";
+      return `when an ally dies: ${s} for this battle`;
+    }
     case "crit_strike": return `${escape(String(p.chance_percent))}% critical strike (double damage)`;
     case "revive_once": return "revive once at full HP";
     case "melee_cleave": {

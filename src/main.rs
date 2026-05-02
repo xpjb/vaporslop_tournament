@@ -287,11 +287,11 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
         ClientMsg::Battle => {
             if run.phase != Phase::Shop { return Err("not in shop".into()); }
             if run.build.team.is_empty() { return Err("no team".into()); }
-            let target_cost = run.build.cost_value();
-            let opponent = state.db.find_opponent(target_cost, &run.id).map_err(|e| e.to_string())?;
+            let target_lifetime_gold = lifetime_gold_earned(run);
+            let opponent = state.db.find_opponent(target_lifetime_gold).map_err(|e| e.to_string())?;
             let (op_name, op_build_raw) = match opponent {
                 Some((_id, name, b)) => (name, b),
-                None => ("ghost".to_string(), game::shop::random_build(target_cost.max(50))),
+                None => ("ghost".to_string(), game::shop::random_build(target_lifetime_gold.max(50))),
             };
             // Reverse opponent's team so their stored team[0] (their front) appears
             // on the far side of the right team, matching mirrored UI orientation.
@@ -334,6 +334,10 @@ async fn handle_run_action(state: &AppState, run: &mut Run, msg: ClientMsg) -> R
         }
         _ => Err("unhandled".into()),
     }
+}
+
+fn lifetime_gold_earned(run: &Run) -> i32 {
+    STARTING_MONEY + run.wins * WIN_REWARD + run.losses * LOSE_REWARD
 }
 
 fn member_item_slot(member: &TeamMember, slot: ItemSlot) -> &Option<String> {

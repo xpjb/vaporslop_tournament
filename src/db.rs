@@ -115,16 +115,15 @@ impl Db {
         } else { Ok(None) }
     }
 
-    /// Find a matchup: build with cost closest to `target_cost`, excluding `exclude_id`.
-    pub fn find_opponent(&self, target_cost: i32, exclude_id: &str) -> Result<Option<(String, String, Build)>> {
+    /// Find a matchup near the run's lifetime gold, including the run itself.
+    pub fn find_opponent(&self, target_lifetime_gold: i32) -> Result<Option<(String, String, Build)>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id,name,build_json FROM runs
-             WHERE id != ?
-             ORDER BY ABS(cost_value - ?) ASC
+             ORDER BY ABS((?2 + wins * ?3 + losses * ?4) - ?1) ASC
              LIMIT 10"
         )?;
-        let mut rows = stmt.query(params![exclude_id, target_cost])?;
+        let mut rows = stmt.query(params![target_lifetime_gold, STARTING_MONEY, WIN_REWARD, LOSE_REWARD])?;
         // Pick a random one of the top 10 to avoid always playing the same opponent.
         let mut candidates: Vec<(String, String, Build)> = vec![];
         while let Some(row) = rows.next()? {

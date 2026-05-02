@@ -1,0 +1,135 @@
+use crate::game::types::*;
+use std::sync::OnceLock;
+
+// Filenames match the actual webp assets in /assets (case-sensitive on some hosts).
+fn build_character_defs() -> Vec<CharacterDef> {
+    use Property::*;
+    vec![
+        CharacterDef {
+            id: "meme_man".into(),
+            name: "Meme Man".into(),
+            sprite: "Meme_Man.webp".into(),
+            cost: 50,
+            might: 10, reflexes: 10, wisdom: 10, hp: 100,
+            properties: vec![],
+        },
+        CharacterDef {
+            id: "picardia".into(),
+            name: "Picardia".into(),
+            sprite: "picardia.webp".into(),
+            cost: 60,
+            might: 12, reflexes: 15, wisdom: 5, hp: 50,
+            properties: vec![],
+        },
+        CharacterDef {
+            id: "azul_picardia".into(),
+            name: "Azul Picardia".into(),
+            sprite: "azul_picardia.webp".into(),
+            cost: 100,
+            might: 12, reflexes: 15, wisdom: 5, hp: 50,
+            properties: vec![FreezeOnHit { sprite: "ice.webp".into() }],
+        },
+        CharacterDef {
+            id: "lemen".into(),
+            name: "Lemen".into(),
+            sprite: "Lemen_man.webp".into(),
+            cost: 40,
+            might: 3, reflexes: 16, wisdom: 8, hp: 20,
+            properties: vec![Ranged { projectile: "lemon.webp".into() }],
+        },
+        CharacterDef {
+            id: "elephoont".into(),
+            name: "Elephoont".into(),
+            sprite: "elephoont.webp".into(),
+            cost: 200,
+            might: 10, reflexes: 7, wisdom: 20, hp: 150,
+            properties: vec![Ranged { projectile: "truelemon.webp".into() }],
+        },
+        CharacterDef {
+            id: "isoceles".into(),
+            name: "Isoceles".into(),
+            sprite: "Isosceles.webp".into(),
+            cost: 50,
+            might: 5, reflexes: 20, wisdom: 5, hp: 1,
+            properties: vec![Ranged { projectile: "octahedron.webp".into() }],
+        },
+        CharacterDef {
+            id: "vegetal".into(),
+            name: "Vegetal".into(),
+            sprite: "vegetal.webp".into(),
+            cost: 30,
+            might: 8, reflexes: 12, wisdom: 1, hp: 50,
+            properties: vec![SummonOnEnemyDeath { species: "vegetal".into() }],
+        },
+        CharacterDef {
+            id: "orang".into(),
+            name: "Orang".into(),
+            sprite: "orang.webp".into(),
+            cost: 40,
+            might: 6, reflexes: 10, wisdom: 10, hp: 200,
+            properties: vec![],
+        },
+        CharacterDef {
+            id: "gren".into(),
+            name: "Gren".into(),
+            sprite: "gren.webp".into(),
+            cost: 60,
+            might: 5, reflexes: 5, wisdom: 10, hp: 60,
+            properties: vec![Healer],
+        },
+    ]
+}
+
+//@item -- when items are added, expand here. Keep ids stable.
+fn build_item_defs() -> Vec<ItemDef> {
+    vec![
+        ItemDef {
+            id: "steve_hat".into(),
+            name: "Steve Hat".into(),
+            sprite: "stevehat.png".into(),
+            cost: 100,
+            slot: ItemSlot::Hat,
+            properties: vec![Property::StatBonus { might: 10, reflexes: 0, wisdom: 0, hp: 0 }],
+        },
+        ItemDef {
+            id: "noggin_hat".into(),
+            name: "Noggin".into(),
+            sprite: "Noggin.webp".into(),
+            cost: 20,
+            slot: ItemSlot::Hat,
+            properties: vec![Property::StatBonus { might: 0, reflexes: 0, wisdom: 0, hp: 50 }],
+        },
+        ItemDef {
+            id: "fedora_hat".into(),
+            name: "Fedora".into(),
+            sprite: "fedora.png".into(),
+            cost: 50,
+            slot: ItemSlot::Hat,
+            properties: vec![Property::StatBonus { might: 0, reflexes: 0, wisdom: 10, hp: 0 }],
+        },
+        ItemDef {
+            id: "pickle_rick".into(),
+            name: "Pickle Rick".into(),
+            sprite: "Pickle_rick_transparent_edgetrimmed.webp".into(),
+            cost: 30,
+            slot: ItemSlot::RightHand,
+            properties: vec![Property::StatBonus { might: 5, reflexes: 0, wisdom: 0, hp: 0 }],
+        },
+    ]
+}
+
+static CHARACTER_DEFS: OnceLock<Vec<CharacterDef>> = OnceLock::new();
+static ITEM_DEFS: OnceLock<Vec<ItemDef>> = OnceLock::new();
+
+pub fn character_defs() -> &'static [CharacterDef] {
+    CHARACTER_DEFS.get_or_init(build_character_defs)
+}
+pub fn item_defs() -> &'static [ItemDef] {
+    ITEM_DEFS.get_or_init(build_item_defs)
+}
+pub fn character_def(id: &str) -> Option<&'static CharacterDef> {
+    character_defs().iter().find(|c| c.id == id)
+}
+pub fn item_def(id: &str) -> Option<&'static ItemDef> {
+    item_defs().iter().find(|i| i.id == id)
+}

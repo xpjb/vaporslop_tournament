@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VAPORSLOP // T O U R N A M E N T</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="bg"></div>
+  <header>
+    <h1>VAPORSLOP <span class="dim">// T O U R N A M E N T</span></h1>
+    <div id="status"></div>
+  </header>
+  <main>
+    <section id="start" class="screen">
+      <h2>enter the arcade</h2>
+      <input id="nameInput" maxlength="24" placeholder="your handle" />
+      <button id="newRunBtn">new run</button>
+      <div class="row">
+        <button id="resumeBtn" class="ghost">resume last run</button>
+        <button id="lbBtn" class="ghost">leaderboard</button>
+      </div>
+    </section>
+
+    <section id="shop" class="screen hidden">
+      <div class="hud">
+        <div>name: <b id="hudName"></b></div>
+        <div>$<b id="hudMoney">0</b></div>
+        <div>wins: <b id="hudWins">0</b></div>
+        <div>losses: <b id="hudLosses">0</b>/<span id="hudMaxLosses">3</span></div>
+        <div>streak: <b id="hudStreak">0</b></div>
+      </div>
+      <h3>your team</h3>
+      <div id="teamDirections">
+        <span>← back</span>
+        <span>front → <span class="dim">faces enemy</span></span>
+      </div>
+      <div id="teamRow" class="row"></div>
+
+      <div id="shopInventory">
+        <h3>shop inventory</h3>
+        <div class="inventory-section">
+          <h4>characters</h4>
+          <div id="shopChars" class="row"></div>
+        </div>
+        <div class="inventory-section">
+          <h4>items</h4>
+          <div id="shopItems" class="row"></div>
+        </div>
+      </div>
+
+      <div class="row controls">
+        <button id="rerollBtn">reroll ($<span id="rerollCost">10</span>)</button>
+        <button id="battleBtn" class="primary">battle ▶</button>
+      </div>
+      <p class="hint">click a character to add to team. drag or click shop items to equip. drag characters or equipped items back into shop inventory to sell.</p>
+    </section>
+
+    <section id="battle" class="screen hidden">
+      <div class="vs">
+        <div id="leftName"></div><span>vs</span><div id="rightName"></div>
+      </div>
+      <canvas id="battleCanvas" width="900" height="320"></canvas>
+      <div id="battleLog"></div>
+      <div class="row">
+        <button id="nextRoundBtn" class="primary hidden">continue</button>
+      </div>
+    </section>
+
+    <section id="gameover" class="screen hidden">
+      <h2>g g</h2>
+      <p>final wins: <b id="goWins"></b> · longest streak counted in leaderboard</p>
+      <button id="goRestart">new run</button>
+      <button id="goLb" class="ghost">leaderboard</button>
+    </section>
+
+    <section id="leaderboard" class="screen hidden">
+      <h2>leaderboard</h2>
+      <ol id="lbList"></ol>
+      <button id="lbBack" class="ghost">back</button>
+    </section>
+  </main>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

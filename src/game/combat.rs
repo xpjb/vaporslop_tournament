@@ -9,6 +9,9 @@ pub struct Combatant {
     pub uid: u32, // unique id within battle
     pub def_id: String,
     pub sprite: String,
+    pub hat_id: Option<String>,
+    pub left_hand_id: Option<String>,
+    pub right_hand_id: Option<String>,
     pub hat_sprite: Option<String>,
     pub left_hand_sprite: Option<String>,
     pub right_hand_sprite: Option<String>,
@@ -37,7 +40,11 @@ pub enum CombatEvent {
     Heal { healer: u32, target: u32, amount: i32 },
     Freeze { target: u32, sprite: String },
     Death { uid: u32, side: u8 },
-    Summon { side: u8, combatant: Combatant },
+    Summon {
+        side: u8,
+        summoner: u32,
+        combatant: Combatant,
+    },
     Hp { uid: u32, hp: i32 },
     End { winner: Option<u8> }, // None = draw
 }
@@ -58,12 +65,16 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
         let mut hat_sprite = None;
         let mut left_hand_sprite = None;
         let mut right_hand_sprite = None;
-        for (slot_id, sprite_out) in [
-            (&m.hat, &mut hat_sprite),
-            (&m.left_hand, &mut left_hand_sprite),
-            (&m.right_hand, &mut right_hand_sprite),
+        let mut hat_id = None;
+        let mut left_hand_id = None;
+        let mut right_hand_id = None;
+        for (slot_id, sprite_out, id_out) in [
+            (&m.hat, &mut hat_sprite, &mut hat_id),
+            (&m.left_hand, &mut left_hand_sprite, &mut left_hand_id),
+            (&m.right_hand, &mut right_hand_sprite, &mut right_hand_id),
         ] {
             if let Some(iid) = slot_id {
+                *id_out = Some(iid.clone());
                 if let Some(idef) = item_def(iid) {
                     *sprite_out = Some(idef.sprite.clone());
                     for p in &idef.properties {
@@ -81,6 +92,7 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
             uid,
             def_id: def.id.clone(),
             sprite: def.sprite.clone(),
+            hat_id, left_hand_id, right_hand_id,
             hat_sprite, left_hand_sprite, right_hand_sprite,
             max_hp: hp, hp,
             might, reflexes, wisdom,
@@ -201,7 +213,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                         events.push(CombatEvent::Death { uid: dead_uid, side: dead_side });
 
                         // Trigger SummonOnEnemyDeath on the *attacker's* team.
-                        let mut summons: Vec<Combatant> = vec![];
+                        let mut summons: Vec<(Combatant, u32)> = vec![];
                         for ally in actors.iter() {
                             if ally.hp <= 0 { continue; }
                             for p in &ally.properties {
@@ -209,24 +221,32 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                                     if dead_def != *species && actors.iter().filter(|c| c.hp > 0).count() + summons.len() < MAX_TEAM {
                                         if let Some(def) = character_def(species) {
                                             let uid = uid_counter; uid_counter += 1;
-                                            summons.push(Combatant {
-                                                uid,
-                                                def_id: def.id.clone(),
-                                                sprite: def.sprite.clone(),
-                                                hat_sprite: None, left_hand_sprite: None, right_hand_sprite: None,
-                                                max_hp: def.hp, hp: def.hp,
-                                                might: def.might, reflexes: def.reflexes, wisdom: def.wisdom,
-                                                properties: def.properties.clone(),
-                                                frozen_turns: 0,
-                                                side,
-                                            });
+                                            summons.push((
+                                                Combatant {
+                                                    uid,
+                                                    def_id: def.id.clone(),
+                                                    sprite: def.sprite.clone(),
+                                                    hat_id: None, left_hand_id: None, right_hand_id: None,
+                                                    hat_sprite: None, left_hand_sprite: None, right_hand_sprite: None,
+                                                    max_hp: def.hp, hp: def.hp,
+                                                    might: def.might, reflexes: def.reflexes, wisdom: def.wisdom,
+                                                    properties: def.properties.clone(),
+                                                    frozen_turns: 0,
+                                                    side,
+                                                },
+                                                ally.uid,
+                                            ));
                                         }
                                     }
                                 }
                             }
                         }
-                        for s in summons {
-                            events.push(CombatEvent::Summon { side, combatant: s.clone() });
+                        for (s, summoner_uid) in summons {
+                            events.push(CombatEvent::Summon {
+                                side,
+                                summoner: summoner_uid,
+                                combatant: s.clone(),
+                            });
                             actors.push(s);
                         }
                     }

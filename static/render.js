@@ -20,15 +20,23 @@ class Sprite {
     this.hat = c.hat_sprite;
     this.left_hand = c.left_hand_sprite;
     this.right_hand = c.right_hand_sprite;
+    this.hat_id = c.hat_id;
+    this.left_hand_id = c.left_hand_id;
+    this.right_hand_id = c.right_hand_id;
     this.max_hp = c.max_hp;
     this.hp = c.hp;
     this.might = c.might;
+    this.reflexes = c.reflexes;
+    this.wisdom = c.wisdom;
+    this.properties = c.properties || [];
     this.x = 0; this.y = FLOOR_Y;
     this.targetX = 0;
     this.dead = false;
     this.flashUntil = 0;
     this.frozenUntil = 0;
     this.shake = 0;
+    this.bounds = null;
+    this.tooltipReference = null;
   }
 }
 
@@ -54,12 +62,13 @@ function layout(left, right, canvas) {
 }
 
 function drawSprite(ctx, s, t) {
-  if (s.dead) return;
+  if (s.dead) { s.bounds = null; return; }
   const i = img(s.sprite);
   const w = 96, h = 96;
   let x = s.x;
   let y = s.y - h;
   if (s.shake > 0) { x += (Math.random() - .5) * s.shake; y += (Math.random() - .5) * s.shake; }
+  s.bounds = { x, y: y - 28, w, h: h + 34 };
   ctx.save();
   if (s.flashUntil > t) ctx.filter = "brightness(2.5) hue-rotate(80deg)";
   if (s.side === 1) { ctx.translate(x + w/2, 0); ctx.scale(-1, 1); ctx.translate(-(x + w/2), 0); }
@@ -112,7 +121,50 @@ function drawProjectile(ctx, p) {
   }
 }
 
-export function playBattle(canvas, battleMsg, charDef, itemDef, onDone) {
+function canvasPoint(canvas, ev) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (ev.clientX - rect.left) * (canvas.width / rect.width),
+    y: (ev.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function spriteReference(canvas, s) {
+  return {
+    getBoundingClientRect() {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = rect.width / canvas.width;
+      const scaleY = rect.height / canvas.height;
+      const b = s.bounds || { x: s.x, y: s.y - 96, w: 96, h: 96 };
+      return {
+        x: rect.left + b.x * scaleX,
+        y: rect.top + b.y * scaleY,
+        left: rect.left + b.x * scaleX,
+        top: rect.top + b.y * scaleY,
+        right: rect.left + (b.x + b.w) * scaleX,
+        bottom: rect.top + (b.y + b.h) * scaleY,
+        width: b.w * scaleX,
+        height: b.h * scaleY,
+      };
+    },
+    contextElement: canvas,
+  };
+}
+
+function hitSprite(list, point) {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i];
+    const b = s.bounds;
+    if (!b || s.dead) continue;
+    if (point.x >= b.x && point.x <= b.x + b.w && point.y >= b.y && point.y <= b.y + b.h) {
+      return s;
+    }
+  }
+  return null;
+}
+
+export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip = {}) {
+  if (canvas.__battleTooltipCleanup) canvas.__battleTooltipCleanup();
   const ctx = canvas.getContext("2d");
   const events = battleMsg.events.slice();
   const spritesById = new Map();
@@ -129,6 +181,31 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone) {
   let nextEventAt = 0;
   let last = performance.now();
   let done = false;
+  let hovered = null;
+
+  const onMouseMove = (ev) => {
+    const point = canvasPoint(canvas, ev);
+    const hit = hitSprite([...leftList, ...rightList], point);
+    if (!hit) {
+      if (hovered) tooltip.hideTooltip?.();
+      hovered = null;
+      return;
+    }
+    hovered = hit;
+    hit.tooltipReference ||= spriteReference(canvas, hit);
+    tooltip.showTooltip?.(hit.tooltipReference, hit);
+  };
+  const onMouseLeave = () => {
+    hovered = null;
+    tooltip.hideTooltip?.();
+  };
+  canvas.addEventListener("mousemove", onMouseMove);
+  canvas.addEventListener("mouseleave", onMouseLeave);
+  canvas.__battleTooltipCleanup = () => {
+    canvas.removeEventListener("mousemove", onMouseMove);
+    canvas.removeEventListener("mouseleave", onMouseLeave);
+    tooltip.hideTooltip?.();
+  };
 
   function applyEvent(ev) {
     switch (ev.type) {
@@ -196,7 +273,13 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone) {
       case "summon": {
         const s = new Sprite(ev.combatant);
         spritesById.set(s.uid, s);
-        if (ev.side === 0) leftList.push(s); else rightList.push(s);
+        const list = ev.side === 0 ? leftList : rightList;
+        const summoner = spritesById.get(ev.summoner);
+        if (summoner && list.includes(summoner)) {
+          list.splice(list.indexOf(summoner), 0, s);
+        } else {
+          list.push(s);
+        }
         layout(leftList, rightList, canvas);
         log(`summoned ${s.def_id}`);
         break;
@@ -247,6 +330,10 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone) {
     leftList.forEach(s => drawSprite(ctx, s, now));
     rightList.forEach(s => drawSprite(ctx, s, now));
     projectiles.forEach(p => drawProjectile(ctx, p));
+    if (hovered && !hovered.dead) {
+      hovered.tooltipReference ||= spriteReference(canvas, hovered);
+      tooltip.showTooltip?.(hovered.tooltipReference, hovered);
+    }
 
     if (done && projectiles.length === 0 && i >= events.length) {
       onDone?.();

@@ -1,3 +1,4 @@
+import { computePosition, autoUpdate, offset, flip, shift } from "https://cdn.jsdelivr.net/npm/@floating-ui/dom/+esm";
 import { playBattle } from "/render.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -58,6 +59,9 @@ function handleServer(msg) {
         else if (msg.winner === 1) log(`✗ defeat — +$${state.consts.lose_reward}`);
         else log(`— draw —`);
         $("#nextRoundBtn").classList.remove("hidden");
+      }, {
+        showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
+        hideTooltip,
       });
       break;
     case "leaderboard":
@@ -78,6 +82,212 @@ const SOCKETS = [
   { key: "left_hand", label: "left" },
   { key: "right_hand", label: "right" },
 ];
+const STAT_KEYS = [
+  { key: "might", label: "might" },
+  { key: "reflexes", label: "reflexes" },
+  { key: "wisdom", label: "wisdom" },
+  { key: "hp", label: "hp" },
+];
+const SLOT_LABELS = { hat: "hat", left_hand: "left hand", right_hand: "right hand" };
+
+let tooltipEl = null;
+let cleanupTooltip = null;
+let activeTooltipReference = null;
+let activeTooltipHtml = "";
+
+function ensureTooltip() {
+  if (tooltipEl) return tooltipEl;
+  tooltipEl = document.createElement("div");
+  tooltipEl.id = "tooltip";
+  tooltipEl.className = "tooltip hidden";
+  tooltipEl.setAttribute("role", "tooltip");
+  document.body.appendChild(tooltipEl);
+  return tooltipEl;
+}
+
+function updateTooltipPosition(reference) {
+  const el = ensureTooltip();
+  computePosition(reference, el, {
+    placement: "top",
+    middleware: [offset(10), flip(), shift({ padding: 8 })],
+  }).then(({ x, y }) => {
+    Object.assign(el.style, { left: `${x}px`, top: `${y}px` });
+  });
+}
+
+function showTooltip(reference, html) {
+  if (!html) return;
+  const el = ensureTooltip();
+  if (activeTooltipReference !== reference) {
+    if (cleanupTooltip) cleanupTooltip();
+    cleanupTooltip = autoUpdate(reference, el, () => updateTooltipPosition(reference));
+    activeTooltipReference = reference;
+  }
+  if (activeTooltipHtml !== html) {
+    el.innerHTML = html;
+    activeTooltipHtml = html;
+  }
+  el.classList.remove("hidden");
+  updateTooltipPosition(reference);
+}
+
+function hideTooltip() {
+  if (cleanupTooltip) cleanupTooltip();
+  cleanupTooltip = null;
+  activeTooltipReference = null;
+  activeTooltipHtml = "";
+  ensureTooltip().classList.add("hidden");
+}
+
+function attachTooltip(el, content) {
+  const show = () => showTooltip(el, typeof content === "function" ? content() : content);
+  el.addEventListener("pointerenter", show);
+  el.addEventListener("focus", show);
+  el.addEventListener("pointerleave", hideTooltip);
+  el.addEventListener("blur", hideTooltip);
+}
+
+function signed(n) {
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
+function statBonusFromProperties(properties = []) {
+  const bonus = { might: 0, reflexes: 0, wisdom: 0, hp: 0 };
+  properties.forEach((p) => {
+    if (p.kind !== "stat_bonus") return;
+    STAT_KEYS.forEach(({ key }) => { bonus[key] += p[key] || 0; });
+  });
+  return bonus;
+}
+
+function memberItems(member) {
+  return SOCKETS
+    .map(({ key }) => ({ key, item: member?.[key] ? itemDef(member[key]) : null }))
+    .filter(({ item }) => item);
+}
+
+function effectiveStats(member) {
+  const cd = charDef(member.def_id);
+  const base = Object.fromEntries(STAT_KEYS.map(({ key }) => [key, cd?.[key] || 0]));
+  const bonus = { might: 0, reflexes: 0, wisdom: 0, hp: 0 };
+  memberItems(member).forEach(({ item }) => {
+    const itemBonus = statBonusFromProperties(item.properties);
+    STAT_KEYS.forEach(({ key }) => { bonus[key] += itemBonus[key]; });
+  });
+  const total = Object.fromEntries(STAT_KEYS.map(({ key }) => [key, base[key] + bonus[key]]));
+  return { base, bonus, total };
+}
+
+function propertyText(p) {
+  switch (p.kind) {
+    case "ranged": return `ranged projectile: ${escape(p.projectile)}`;
+    case "healer": return "healer";
+    case "freeze_on_hit": return `freeze on hit: ${escape(p.sprite)}`;
+    case "summon_on_enemy_death": return `summons ${escape(p.species)} on enemy death`;
+    case "stat_bonus": {
+      const parts = STAT_KEYS
+        .map(({ key, label }) => p[key] ? `${label} ${signed(p[key])}` : null)
+        .filter(Boolean);
+      return parts.length ? `stat bonus: ${parts.join(", ")}` : "stat bonus";
+    }
+    default: return escape(p.kind || "property");
+  }
+}
+
+function propertyList(properties = []) {
+  if (!properties.length) return `<div class="tooltip-empty">no properties</div>`;
+  return `<ul class="tooltip-props">${properties.map((p) => `<li>${propertyText(p)}</li>`).join("")}</ul>`;
+}
+
+function statGrid(base, total = base, currentHp = null) {
+  return `<div class="tooltip-stats">
+    ${STAT_KEYS.map(({ key, label }) => {
+      const delta = total[key] - base[key];
+      const value = key === "hp" && currentHp !== null ? `${currentHp}/${total[key]}` : total[key];
+      const mod = delta ? `<span class="tooltip-delta">${signed(delta)}</span>` : "";
+      const baseText = delta ? `<span class="tooltip-base">base ${base[key]}</span>` : "";
+      return `<div><span>${label}</span><b>${value}</b>${mod}${baseText}</div>`;
+    }).join("")}
+  </div>`;
+}
+
+function itemIcon(item, label = "") {
+  return `<span class="tooltip-item-icon"><img src="/assets/${escape(item.sprite)}" alt="${escape(item.name)}" />${label ? `<span>${escape(label)}</span>` : ""}</span>`;
+}
+
+function itemTooltip(item) {
+  if (!item) return "";
+  return `<div class="tooltip-title">${escape(item.name)}</div>
+    <div class="tooltip-meta">$${item.cost} · ${escape(item.slot)}</div>
+    <div class="tooltip-hero">${itemIcon(item)}</div>
+    <div class="tooltip-section">properties</div>
+    ${propertyList(item.properties)}`;
+}
+
+function characterTooltip(cd) {
+  if (!cd) return "";
+  return `<div class="tooltip-title">${escape(cd.name)}</div>
+    <div class="tooltip-meta">$${cd.cost}</div>
+    <div class="tooltip-hero"><img src="/assets/${escape(cd.sprite)}" alt="${escape(cd.name)}" /></div>
+    ${statGrid(cd)}
+    <div class="tooltip-section">properties</div>
+    ${propertyList(cd.properties)}`;
+}
+
+function memberTooltip(member) {
+  const cd = charDef(member.def_id);
+  if (!cd) return "";
+  const stats = effectiveStats(member);
+  const items = memberItems(member);
+  const itemRows = items.length
+    ? items.map(({ key, item }) => `<div class="tooltip-equipped">${itemIcon(item, SLOT_LABELS[key])}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>`).join("")
+    : `<div class="tooltip-empty">no equipped items</div>`;
+  const nonStatItemProps = items.flatMap(({ item }) => item.properties.filter((p) => p.kind !== "stat_bonus"));
+  const combinedProps = [...(cd.properties || []), ...nonStatItemProps];
+  return `<div class="tooltip-title">${escape(cd.name)}</div>
+    <div class="tooltip-meta">$${cd.cost} · equipped value $${items.reduce((sum, { item }) => sum + item.cost, cd.cost)}</div>
+    <div class="tooltip-hero"><img src="/assets/${escape(cd.sprite)}" alt="${escape(cd.name)}" /></div>
+    ${statGrid(stats.base, stats.total)}
+    <div class="tooltip-section">active properties</div>
+    ${propertyList(combinedProps)}
+    <div class="tooltip-section">equipped items</div>
+    ${itemRows}`;
+}
+
+function combatantTooltip(c) {
+  const cd = charDef(c.def_id);
+  const base = cd ? Object.fromEntries(STAT_KEYS.map(({ key }) => [key, cd[key] || 0])) : {
+    might: c.might || 0,
+    reflexes: c.reflexes || 0,
+    wisdom: c.wisdom || 0,
+    hp: c.max_hp || c.hp || 0,
+  };
+  const total = {
+    might: c.might || 0,
+    reflexes: c.reflexes || 0,
+    wisdom: c.wisdom || 0,
+    hp: c.max_hp || c.hp || 0,
+  };
+  const itemIds = [
+    ["hat", c.hat_id],
+    ["left hand", c.left_hand_id],
+    ["right hand", c.right_hand_id],
+  ].filter(([, id]) => id);
+  const itemRows = itemIds.length
+    ? itemIds.map(([slot, id]) => {
+      const item = itemDef(id);
+      return item ? `<div class="tooltip-equipped">${itemIcon(item, slot)}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>` : "";
+    }).join("")
+    : `<div class="tooltip-empty">no equipped items</div>`;
+  return `<div class="tooltip-title">${escape(cd?.name || c.def_id)}</div>
+    <div class="tooltip-meta">battle unit</div>
+    <div class="tooltip-hero"><img src="/assets/${escape(c.sprite)}" alt="${escape(cd?.name || c.def_id)}" /></div>
+    ${statGrid(base, total, Math.max(0, c.hp || 0))}
+    <div class="tooltip-section">active properties</div>
+    ${propertyList(c.properties || [])}
+    <div class="tooltip-section">equipped items</div>
+    ${itemRows}`;
+}
 
 function flash(text) {
   const el = $("#status"); el.textContent = text; el.style.color = "#ff5cf2";
@@ -141,6 +351,7 @@ function renderTeam() {
       slot.addEventListener("dragleave", onTeamSlotDragLeave);
       slot.addEventListener("drop", onTeamSlotDrop);
       slot.addEventListener("dragend", onDragEnd);
+      attachTooltip(slot, () => memberTooltip(m));
     } else {
       slot.innerHTML = `<div class="name">empty</div>`;
     }
@@ -190,13 +401,15 @@ function renderItemSockets(teamIdx, member) {
     socket.className = "item-socket" + (itemId ? " filled" : "");
     socket.dataset.teamIdx = teamIdx;
     socket.dataset.itemSlot = key;
-    socket.title = label;
+    socket.setAttribute("aria-label", label);
     if (itemId) {
       const item = itemDef(itemId);
       socket.draggable = true;
       socket.innerHTML = item ? `<img src="/assets/${item.sprite}" alt="${escape(item.name)}" />` : label;
+      if (item) attachTooltip(socket, () => itemTooltip(item));
       socket.addEventListener("dragstart", (e) => {
         e.stopPropagation();
+        hideTooltip();
         setDrag(e, { type: "team_item", team: teamIdx, slot: key, itemSlot: item?.slot ?? key });
         socket.classList.add("dragging");
       });
@@ -288,6 +501,7 @@ function renderShop() {
       <div class="stats">⚔${cd.might} ⚡${cd.reflexes} ✦${cd.wisdom} ❤${cd.hp}</div>
       <div class="cost">$${cd.cost}</div>
     `;
+    attachTooltip(c, () => characterTooltip(cd));
     c.onclick = () => send({ type: "buy_character", slot: i });
     sc.appendChild(c);
   });
@@ -305,10 +519,12 @@ function renderShop() {
       <div class="stats">${it.slot}</div>
     `;
     c.addEventListener("dragstart", (e) => {
+      hideTooltip();
       setDrag(e, { type: "shop_item", slot: i, itemSlot: itemSocketId(it.slot) });
       c.classList.add("dragging");
     });
     c.addEventListener("dragend", onDragEnd);
+    attachTooltip(c, () => itemTooltip(it));
     c.onclick = () => {
       state.pendingItem = state.pendingItem === i ? null : i;
       renderTeam(); renderShop();

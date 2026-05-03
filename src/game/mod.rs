@@ -1,4 +1,4 @@
-pub mod types;
+pub mod combat;
 pub mod data;
 pub mod shop;
-pub mod combat;
+pub mod types;

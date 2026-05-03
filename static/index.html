@@ -4,12 +4,50 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>VAPORSLOP // T O U R N A M E N T</title>
-<link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <div id="bg"></div>
   <header>
-    <h1>VAPORSLOP <span class="dim">// T O U R N A M E N T</span></h1>
+    <div class="header-top">
+      <div class="header-left">
+        <h1>VAPORSLOP <span class="dim">// T O U R N A M E N T</span></h1>
+        <p id="siteStats" class="site-stats dim" aria-live="polite">
+          <span><b id="statActivePlayers">—</b> active</span>
+          <span class="site-stats-sep" aria-hidden="true">·</span>
+          <span><b id="statLoggedToday">—</b> logged in today</span>
+        </p>
+      </div>
+      <div class="header-right">
+        <div id="navControls" aria-label="connection and audio controls">
+          <div class="bgm-control">
+            <button id="bgmMuteBtn" class="bgm-mute" type="button" aria-pressed="false" aria-label="mute background music">🔊</button>
+            <input id="bgmVolume" type="range" min="0" max="100" value="35" aria-label="background music volume" />
+          </div>
+          <div id="connectionPill" class="connection-pill connection-pill--connecting" role="status" aria-live="polite" aria-atomic="true">connecting</div>
+        </div>
+        <aside id="lbDock" class="lb-dock" aria-label="leaderboard">
+          <div class="lb-panel lb-dock-panel">
+            <div class="lb-header">
+              <h2 id="lbTitle">⌬ leaderboard ⌬</h2>
+            </div>
+            <div class="lb-toolbar">
+              <button id="lbTopBtn" class="ghost" type="button">⏶ top</button>
+              <button id="lbMeBtn" class="ghost" type="button">◎ me</button>
+              <span id="lbRankInfo" class="lb-rank-info dim">—</span>
+              <span class="lb-spacer"></span>
+              <button id="lbUpBtn" class="ghost lb-arrow" type="button" aria-label="page up">▲</button>
+              <button id="lbDownBtn" class="ghost lb-arrow" type="button" aria-label="page down">▼</button>
+            </div>
+            <div id="lbScroll" class="lb-scroll" tabindex="0">
+              <div id="lbTopSentinel" class="lb-sentinel">↑ scroll for higher ranks ↑</div>
+              <ol id="lbList" class="lb-list"></ol>
+              <div id="lbBottomSentinel" class="lb-sentinel">↓ scroll for lower ranks ↓</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
     <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
   </header>
   <main>
@@ -18,11 +56,12 @@
         name:
         <input id="hudNameInput" maxlength="24" />
         <button id="saveNicknameBtn" class="ghost">save</button>
+        <span id="hudMmrWrap" class="dim">(<span id="hudMmr">1000</span>)</span>
       </div>
       <div>$<b id="hudMoney">0</b></div>
       <div>wins: <b id="hudWins">0</b></div>
       <div>losses: <b id="hudLosses">0</b>/<span id="hudMaxLosses">3</span></div>
-      <div>streak: <b id="hudStreak">0</b></div>
+      <div>ultimate: <b id="hudMaxWins">30</b> wins</div>
     </div>
 
     <section id="start" class="screen">
@@ -30,10 +69,6 @@
       <input id="nameInput" maxlength="24" placeholder="your handle" />
       <button id="saveStartNicknameBtn" class="ghost">save nickname</button>
       <button id="newRunBtn">new run</button>
-      <div class="row">
-        <button id="resumeBtn" class="ghost">resume last run</button>
-        <button id="lbBtn" class="ghost">leaderboard</button>
-      </div>
     </section>
 
     <section id="shop" class="screen hidden">
@@ -60,6 +95,7 @@
         <button id="rerollBtn">reroll ($<span id="rerollCost">10</span>)</button>
         <button id="battleBtn" class="primary">battle ▶</button>
       </div>
+      <button id="quitRunBtn" class="quit-run-button" type="button">quit run</button>
       <p class="hint">click a character to add to team. drag or click shop items to equip. drag characters or equipped items back into shop inventory to sell.</p>
     </section>
 
@@ -75,23 +111,33 @@
     </section>
 
     <section id="gameover" class="screen hidden">
-      <h2>g g</h2>
-      <p>final wins: <b id="goWins"></b> · longest streak counted in leaderboard</p>
-      <button id="goRestart">new run</button>
-      <button id="goLb" class="ghost">leaderboard</button>
-    </section>
-
-    <section id="leaderboard" class="screen hidden">
-      <h2>leaderboard</h2>
-      <ol id="lbList"></ol>
-      <div class="row controls lb-controls">
-        <button id="lbPrev" class="ghost">prev</button>
-        <span id="lbPageInfo">page 1 / 1</span>
-        <button id="lbNext" class="ghost">next</button>
+      <div id="goTitle" class="go-title go-title-defeat">GG</div>
+      <p id="goSubtitle" class="go-subtitle"></p>
+      <p id="goRecord" class="go-record"></p>
+      <p class="dim">final wins: <b id="goWins"></b>/<span id="goMaxWins">30</span> · MMR ranks the leaderboard</p>
+      <div id="goReplayWrap" class="hidden">
+        <div class="vs">
+          <div id="goLeftName"></div><span>vs</span><div id="goRightName"></div>
+        </div>
+        <canvas id="goReplayCanvas" width="900" height="320"></canvas>
       </div>
-      <button id="lbBack" class="ghost">back</button>
+      <div class="row">
+        <button id="goRestart">new run</button>
+      </div>
     </section>
   </main>
-  <script type="module" src="/main.js"></script>
+
+  <div id="quitRunModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="quitRunTitle">
+    <div class="modal-backdrop" data-close-quit-modal></div>
+    <div class="modal-panel">
+      <h2 id="quitRunTitle">quit this run?</h2>
+      <p>your current team, shop, wins, and losses will be replaced with a fresh run.</p>
+      <div class="row controls modal-actions">
+        <button id="confirmQuitRunBtn" class="danger" type="button">quit and start over</button>
+        <button id="cancelQuitRunBtn" class="ghost" type="button">keep playing</button>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
 </body>
 </html>

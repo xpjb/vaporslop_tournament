@@ -8,18 +8,31 @@ pub const STARTING_MONEY: i32 = 100;
 pub const WIN_REWARD: i32 = 100;
 pub const LOSE_REWARD: i32 = 50;
 pub const MAX_LOSSES: i32 = 3;
+pub const MAX_WINS: i32 = 30;
+pub const STARTING_MMR: i32 = 1000;
+pub const MMR_K_FACTOR: f64 = 32.0;
 pub const SELL_RATIO: f32 = 1.0; // 100%
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Property {
-    Ranged { projectile: String },
+    Ranged {
+        projectile: String,
+    },
     Healer,
-    FreezeOnHit { sprite: String },
-    SummonOnEnemyDeath { species: String },
-    SummonOnAllyDeath { species: String },
+    FreezeOnHit {
+        sprite: String,
+    },
+    SummonOnEnemyDeath {
+        species: String,
+    },
+    SummonOnAllyDeath {
+        species: String,
+    },
     /// Living wearer gains this much might each time an ally on the same side dies.
-    MightOnAllyDeath { might: i32 },
+    MightOnAllyDeath {
+        might: i32,
+    },
     /// Living wearer gains these stats (and `hp` to max HP and current HP, capped) each time an ally on the same side dies.
     StatsOnAllyDeath {
         might: i32,
@@ -27,17 +40,46 @@ pub enum Property {
         wisdom: i32,
         hp: i32,
     },
+    /// Living wearer gains these stats (and `hp` to max HP and current HP, capped) each time they kill an enemy.
+    StatsOnKill {
+        might: i32,
+        reflexes: i32,
+        wisdom: i32,
+        hp: i32,
+    },
     /// On each damaging hit, chance_percent roll (0–100) to deal double damage.
-    CritStrike { chance_percent: u8 },
+    CritStrike {
+        chance_percent: u8,
+    },
     /// Once per battle, when HP reaches 0, revive at full effective HP (charges tracked at runtime).
     ReviveOnce,
     /// Melee only: hit the first `count` living enemies in formation order per swing.
-    MeleeCleave { count: u8 },
+    MeleeCleave {
+        count: u8,
+    },
+    /// Melee only: add `plus` extra cleave targets (stacks across gear). Combined with innate `MeleeCleave` max or 1.
+    MeleeCleaveBonus {
+        plus: u8,
+    },
     /// May melee (might-based) from the second living formation slot; overrides `Ranged` there.
     MeleeFromSecond,
-    StatBonus { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
+    StatBonus {
+        might: i32,
+        reflexes: i32,
+        wisdom: i32,
+        hp: i32,
+    },
+    /// Stacks. Total armour subtracts that much from each hit’s damage (min 0).
+    Armour {
+        value: i32,
+    },
     /// While alive, adds these stats to the ally in formation front (first living slot).
-    BuffFormationFront { might: i32, reflexes: i32, wisdom: i32, hp: i32 },
+    BuffFormationFront {
+        might: i32,
+        reflexes: i32,
+        wisdom: i32,
+        hp: i32,
+    },
 }
 
 /// Where an item may be equipped (character still has two distinct hand sockets).
@@ -90,7 +132,10 @@ pub struct TeamMember {
 
 impl TeamMember {
     pub fn item_ids(&self) -> impl Iterator<Item = &String> {
-        self.hat.iter().chain(self.left_hand.iter()).chain(self.right_hand.iter())
+        self.hat
+            .iter()
+            .chain(self.left_hand.iter())
+            .chain(self.right_hand.iter())
     }
 }
 
@@ -102,13 +147,20 @@ pub struct Build {
 
 impl Build {
     pub fn cost_value(&self) -> i32 {
-        self.team.iter().map(|m| {
-            let mut c = crate::game::data::character_def(&m.def_id).map(|d| d.cost).unwrap_or(0);
-            for iid in m.item_ids() {
-                c += crate::game::data::item_def(iid).map(|d| d.cost).unwrap_or(0);
-            }
-            c
-        }).sum()
+        self.team
+            .iter()
+            .map(|m| {
+                let mut c = crate::game::data::character_def(&m.def_id)
+                    .map(|d| d.cost)
+                    .unwrap_or(0);
+                for iid in m.item_ids() {
+                    c += crate::game::data::item_def(iid)
+                        .map(|d| d.cost)
+                        .unwrap_or(0);
+                }
+                c
+            })
+            .sum()
     }
 }
 
@@ -130,6 +182,7 @@ pub struct Run {
     pub losses: i32,
     pub streak: i32,
     pub best_streak: i32,
+    pub mmr: i32,
     pub alive: bool,
     pub build: Build,
     pub shop: Shop,

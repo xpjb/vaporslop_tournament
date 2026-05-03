@@ -9,10 +9,12 @@ pub fn roll_shop() -> Shop {
     let items: Vec<String> = item_defs().iter().map(|i| i.id.clone()).collect();
     let mut shop = Shop::default();
     for _ in 0..SHOP_CHAR_SLOTS {
-        shop.characters.push(Some(chars.choose(&mut rng).cloned().unwrap()));
+        shop.characters
+            .push(Some(chars.choose(&mut rng).cloned().unwrap()));
     }
     for _ in 0..SHOP_ITEM_SLOTS {
-        shop.items.push(Some(items.choose(&mut rng).cloned().unwrap()));
+        shop.items
+            .push(Some(items.choose(&mut rng).cloned().unwrap()));
     }
     shop
 }
@@ -54,12 +56,23 @@ pub fn ai_ladder_build(target_cost: i32) -> Build {
             pool = affordable;
         }
 
-        pool.sort_by_key(|c| if is_frontline_def(c) { front_score(c) } else { back_score(c) });
+        pool.sort_by_key(|c| {
+            if is_frontline_def(c) {
+                front_score(c)
+            } else {
+                back_score(c)
+            }
+        });
         pool.reverse();
         let pick_pool_len = pool.len().min(3);
         let pick = pool[..pick_pool_len].choose(&mut rng).unwrap();
         spent += pick.cost;
-        team.push(TeamMember { def_id: pick.id.clone(), hat: None, left_hand: None, right_hand: None });
+        team.push(TeamMember {
+            def_id: pick.id.clone(),
+            hat: None,
+            left_hand: None,
+            right_hand: None,
+        });
     }
 
     arrange_ai_team(&mut team);
@@ -77,7 +90,9 @@ fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut impl Rn
     loop {
         let mut candidates: Vec<(usize, &ItemDef, i32)> = vec![];
         for (member_idx, member) in team.iter().enumerate() {
-            let Some(def) = character_def(&member.def_id) else { continue; };
+            let Some(def) = character_def(&member.def_id) else {
+                continue;
+            };
             let wants_wisdom = is_backline_def(def);
             for item in item_defs().iter() {
                 if item.cost <= remaining && can_equip_item(member, item) {
@@ -121,7 +136,9 @@ fn equip_item(member: &mut TeamMember, item: &ItemDef) {
 
 fn arrange_ai_team(team: &mut [TeamMember]) {
     team.sort_by_key(|m| {
-        let Some(def) = character_def(&m.def_id) else { return 0; };
+        let Some(def) = character_def(&m.def_id) else {
+            return 0;
+        };
         if is_frontline_def(def) {
             10_000 + front_score(def)
         } else {
@@ -132,7 +149,9 @@ fn arrange_ai_team(team: &mut [TeamMember]) {
 }
 
 fn is_frontline_member(member: &TeamMember) -> bool {
-    character_def(&member.def_id).map(is_frontline_def).unwrap_or(false)
+    character_def(&member.def_id)
+        .map(is_frontline_def)
+        .unwrap_or(false)
 }
 
 fn is_frontline_def(def: &CharacterDef) -> bool {
@@ -143,9 +162,7 @@ fn is_backline_def(def: &CharacterDef) -> bool {
     def.properties.iter().any(|p| {
         matches!(
             p,
-            Property::Ranged { .. }
-                | Property::Healer
-                | Property::BuffFormationFront { .. }
+            Property::Ranged { .. } | Property::Healer | Property::BuffFormationFront { .. }
         )
     })
 }
@@ -159,23 +176,32 @@ fn back_score(def: &CharacterDef) -> i32 {
 }
 
 fn item_fit_score(item: &ItemDef, wants_wisdom: bool) -> i32 {
-    item.properties.iter().map(|p| match p {
-        Property::StatBonus { might, reflexes, wisdom, hp } => {
-            if wants_wisdom {
-                wisdom * 8 + reflexes * 2 + hp + might
-            } else {
-                hp * 3 + might * 8 + reflexes * 2 + wisdom
+    item.properties
+        .iter()
+        .map(|p| match p {
+            Property::StatBonus {
+                might,
+                reflexes,
+                wisdom,
+                hp,
+            } => {
+                if wants_wisdom {
+                    wisdom * 8 + reflexes * 2 + hp + might
+                } else {
+                    hp * 3 + might * 8 + reflexes * 2 + wisdom
+                }
             }
-        }
-        _ => 10,
-    }).sum()
+            Property::Armour { value } => *value * 3,
+            _ => 10,
+        })
+        .sum()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn ai_ladder_build_puts_backline_behind_frontline() {
@@ -184,7 +210,9 @@ mod tests {
             assert!(!build.team.is_empty());
 
             let first_backline = build.team.iter().position(|m| {
-                character_def(&m.def_id).map(is_backline_def).unwrap_or(false)
+                character_def(&m.def_id)
+                    .map(is_backline_def)
+                    .unwrap_or(false)
             });
             let last_frontline = build.team.iter().rposition(is_frontline_member);
 

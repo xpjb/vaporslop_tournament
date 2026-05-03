@@ -1,13 +1,20 @@
 import { computePosition, autoUpdate, offset, flip, shift } from "https://cdn.jsdelivr.net/npm/@floating-ui/dom/+esm";
-import { playBattle } from "/render.js";
+import { playBattle } from "./render.js";
+import { mountBasePath } from "./path-base.js";
+
+const BASE_PATH = mountBasePath(import.meta);
+function assetHref(sprite) {
+  return `${BASE_PATH}/assets/${sprite}`;
+}
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const PLAYER_ID_KEY = "playerUuid";
 const NICKNAME_KEY = "playerNickname";
-const RUN_ID_KEY = "runId";
-const LB_PAGE_SIZE = 10;
+const BGM_VOLUME_KEY = "bgmVolume";
+const BGM_MUTED_KEY = "bgmMuted";
+const LB_PAGE_SIZE = 25;
 
 const state = {
   ws: null,
@@ -17,11 +24,27 @@ const state = {
   pendingItem: null, // shop item slot waiting for team target
   lastBattle: null,
   battleAnimating: false,
+  autoResumePending: false,
   playerId: getOrCreatePlayerId(),
   nickname: localStorage.getItem(NICKNAME_KEY) || "anon",
-  leaderboardPage: 1,
-  leaderboardPageCount: 1,
+  bgmAudio: null,
+  bgmVolume: getStoredBgmVolume(),
+  bgmMuted: localStorage.getItem(BGM_MUTED_KEY) === "1",
+  lb: {
+    entries: [], // contiguous list of {rank, player_id, name, mmr, wins}
+    minPage: null,
+    maxPage: null,
+    pageCount: 1,
+    perPage: LB_PAGE_SIZE,
+    playerRank: null,
+    loading: false,
+    pendingScroll: null, // "top" | "rank:<n>" | null
+  },
 };
+
+function isCurrentRunId(runId) {
+  return !!runId && state.run?.id === runId;
+}
 
 function getOrCreatePlayerId() {
   let id = localStorage.getItem(PLAYER_ID_KEY);
@@ -29,6 +52,85 @@ function getOrCreatePlayerId() {
   id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   localStorage.setItem(PLAYER_ID_KEY, id);
   return id;
+}
+
+function getStoredBgmVolume() {
+  const n = Number(localStorage.getItem(BGM_VOLUME_KEY));
+  if (!Number.isFinite(n)) return 0.35;
+  return Math.max(0, Math.min(1, n));
+}
+
+function ensureBgmAudio() {
+  if (state.bgmAudio) return state.bgmAudio;
+  const audio = new Audio(assetHref("staticeulogy.opus"));
+  audio.loop = true;
+  audio.preload = "auto";
+  state.bgmAudio = audio;
+  syncBgmControls();
+  return audio;
+}
+
+function syncBgmControls() {
+  const audio = state.bgmAudio;
+  if (audio) {
+    audio.volume = state.bgmVolume;
+    audio.muted = state.bgmMuted || state.bgmVolume <= 0;
+  }
+  const slider = $("#bgmVolume");
+  if (slider) slider.value = String(Math.round(state.bgmVolume * 100));
+  const btn = $("#bgmMuteBtn");
+  if (!btn) return;
+  const muted = state.bgmMuted || state.bgmVolume <= 0;
+  btn.textContent = muted ? "🔇" : "🔊";
+  btn.setAttribute("aria-pressed", muted ? "true" : "false");
+  btn.setAttribute("aria-label", muted ? "unmute background music" : "mute background music");
+}
+
+function startBgm() {
+  if (state.bgmMuted || state.bgmVolume <= 0) return;
+  const audio = ensureBgmAudio();
+  syncBgmControls();
+  audio.play().catch(() => {});
+}
+
+function setBgmMuted(muted) {
+  state.bgmMuted = muted;
+  if (!muted && state.bgmVolume <= 0) {
+    state.bgmVolume = 0.35;
+    localStorage.setItem(BGM_VOLUME_KEY, String(state.bgmVolume));
+  }
+  localStorage.setItem(BGM_MUTED_KEY, muted ? "1" : "0");
+  syncBgmControls();
+  if (muted) {
+    state.bgmAudio?.pause();
+  } else {
+    startBgm();
+  }
+}
+
+function setBgmVolume(value) {
+  state.bgmVolume = Math.max(0, Math.min(1, Number(value) / 100 || 0));
+  localStorage.setItem(BGM_VOLUME_KEY, String(state.bgmVolume));
+  if (state.bgmVolume > 0 && state.bgmMuted) {
+    state.bgmMuted = false;
+    localStorage.setItem(BGM_MUTED_KEY, "0");
+  }
+  syncBgmControls();
+  startBgm();
+}
+
+function setConnectionStatus(label, variant) {
+  const el = $("#connectionPill");
+  if (!el) return;
+  el.textContent = label;
+  el.classList.remove("connection-pill--connecting", "connection-pill--online", "connection-pill--offline");
+  el.classList.add(`connection-pill--${variant}`);
+}
+
+function syncSiteStats(s) {
+  if (!s || typeof s.active_players !== "number" || typeof s.logged_in_today !== "number") return;
+  $("#statActivePlayers").textContent = String(s.active_players);
+  $("#statLoggedToday").textContent = String(s.logged_in_today);
 }
 
 function setNickname(name, notifyServer = true) {
@@ -57,16 +159,68 @@ function syncRunHudVisibility() {
   hud.classList.toggle("hidden", !(r && (shopOn || battleOn)));
 }
 
+function syncRunHudValues() {
+  const r = state.run;
+  if (!r) return;
+  if (document.activeElement !== $("#hudNameInput")) {
+    $("#hudNameInput").value = r.name;
+  }
+  $("#hudMoney").textContent = r.money;
+  $("#hudWins").textContent = r.wins;
+  $("#hudLosses").textContent = r.losses;
+  $("#hudMmr").textContent = r.mmr ?? "????";
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  state.ws = new WebSocket(`${proto}://${location.host}/ws`);
-  state.ws.onmessage = (ev) => {
+  const ws = new WebSocket(`${proto}://${location.host}${BASE_PATH}/ws`);
+  state.ws = ws;
+  setConnectionStatus("connecting", "connecting");
+  ws.onopen = () => {
+    if (state.ws === ws) setConnectionStatus("online", "online");
+  };
+  ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     handleServer(msg);
   };
-  state.ws.onclose = () => setTimeout(connect, 1000);
+  ws.onclose = () => {
+    if (state.ws !== ws) return;
+    setConnectionStatus("reconnecting", "offline");
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = () => {
+    if (state.ws === ws) setConnectionStatus("offline", "offline");
+  };
 }
-function send(obj) { state.ws?.send(JSON.stringify(obj)); }
+function send(obj) {
+  if (state.ws?.readyState !== WebSocket.OPEN) return false;
+  state.ws.send(JSON.stringify(obj));
+  return true;
+}
+
+function resumeRun(quiet = false) {
+  state.autoResumePending = quiet;
+  return send({ type: "resume", player_id: state.playerId });
+}
+
+function startNewRun() {
+  setNickname($("#nameInput").value || state.nickname, false);
+  state.lastBattle = null;
+  state.battleAnimating = false;
+  return send({ type: "new_run", player_id: state.playerId, name: state.nickname });
+}
+
+function openQuitRunModal() {
+  if (!state.run) return;
+  const modal = $("#quitRunModal");
+  modal.classList.remove("hidden");
+  $("#confirmQuitRunBtn").focus();
+}
+
+function closeQuitRunModal() {
+  $("#quitRunModal").classList.add("hidden");
+  $("#quitRunBtn")?.focus();
+}
 
 function handleServer(msg) {
   switch (msg.type) {
@@ -75,34 +229,58 @@ function handleServer(msg) {
       state.defs.items = msg.items;
       state.consts = msg.constants;
       $("#hudMaxLosses").textContent = msg.constants.max_losses;
+      $("#hudMaxWins").textContent = msg.constants.max_wins;
+      $("#goMaxWins").textContent = msg.constants.max_wins;
       $("#rerollCost").textContent = msg.constants.reroll_cost;
+      if (msg.site_stats) syncSiteStats(msg.site_stats);
+      resumeRun(true);
+      loadLeaderboard();
       break;
     case "state":
+      state.autoResumePending = false;
       state.run = msg.run;
-      localStorage.setItem(RUN_ID_KEY, msg.run.id);
       setNickname(msg.run.name, false);
       renderRun();
       break;
     case "battle":
+      if (state.run && !isCurrentRunId(msg.run_id)) break;
       state.lastBattle = msg;
-      // Authoritative post-fight snapshot (same payload the server persists right after).
-      if (state.run) {
-        Object.assign(state.run, {
-          phase: msg.phase,
-          wins: msg.wins,
-          losses: msg.losses,
-          streak: msg.streak,
-          alive: msg.alive,
-          money: msg.money_after,
-        });
+      const battleRunId = msg.run_id;
+      // Keep pre-battle HUD values during replay; the post-battle snapshot is
+      // applied only once the animation finishes so the result isn't spoiled.
+      const preBattleRun = state.run ? { ...state.run } : null;
+      const postBattleRun = msg.run;
+      const applyBattleSnapshot = (m) => {
+        if (!isCurrentRunId(battleRunId)) return false;
+        if (m.run) {
+          state.run = m.run;
+        } else {
+          Object.assign(state.run, {
+            phase: m.phase,
+            wins: m.wins,
+            losses: m.losses,
+            alive: m.alive,
+            money: m.money_after,
+          });
+        }
+        return true;
+      };
+      if (preBattleRun) {
+        state.run = preBattleRun;
+      } else {
+        state.run = postBattleRun;
       }
+      syncRunHudValues();
       show("battle");
-      $("#leftName").textContent = state.run?.name ?? "you";
-      $("#rightName").textContent = msg.opponent_name;
+      $("#leftName").textContent = formatPlayerName(state.run?.name ?? "you", msg.player_mmr_before);
+      $("#rightName").textContent = formatPlayerName(msg.opponent_name, msg.opponent_mmr_before, {
+        unknownMmr: msg.opponent_mmr_before == null,
+      });
       $("#nextRoundBtn").classList.add("hidden");
       $("#battleLog").innerHTML = "";
       state.battleAnimating = true;
       playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
+        if (!isCurrentRunId(battleRunId)) return;
         state.battleAnimating = false;
         const log = (t) => {
           const d = document.createElement("div");
@@ -113,30 +291,32 @@ function handleServer(msg) {
         else log(`— draw —`);
         if (state.lastBattle && state.run) {
           const m = state.lastBattle;
-          Object.assign(state.run, {
-            phase: m.phase,
-            wins: m.wins,
-            losses: m.losses,
-            streak: m.streak,
-            alive: m.alive,
-            money: m.money_after,
-          });
+          applyBattleSnapshot(m);
+          syncRunHudValues();
         }
         if (state.run?.phase !== "game_over") {
           $("#nextRoundBtn").classList.remove("hidden");
+        } else {
+          renderRun();
         }
-        renderRun();
       }, {
         showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
         hideTooltip,
       });
       break;
     case "leaderboard":
-      show("leaderboard");
-      renderLeaderboard(msg);
+      handleLeaderboardMsg(msg);
+      break;
+    case "site_stats":
+      syncSiteStats(msg);
       break;
     case "error": {
       const m = msg.message;
+      if (state.autoResumePending && m === "run not found") {
+        state.autoResumePending = false;
+        break;
+      }
+      state.autoResumePending = false;
       const cashDenied =
         /^need \$[\d]+ more/i.test(m) ||
         /costs \$[\d]+, have \$/i.test(m);
@@ -151,6 +331,13 @@ function handleServer(msg) {
 }
 
 const escape = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function formatPlayerName(name, mmr, opts = {}) {
+  const label = name || "anon";
+  if (opts.unknownMmr) return `${label} (????)`;
+  const value = Number(mmr);
+  if (!Number.isFinite(value)) return label;
+  return `${label} (${Math.round(value)})`;
+}
 const charDef = (id) => state.defs.characters.find(c => c.id === id);
 const itemDef = (id) => state.defs.items.find(i => i.id === id);
 const SOCKETS = [
@@ -227,6 +414,35 @@ function signed(n) {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+function armourRatingFromProperties(properties = []) {
+  let sum = 0;
+  for (const p of properties) {
+    if (p?.kind !== "armour") continue;
+    sum += Number(p.value) || 0;
+  }
+  return sum;
+}
+
+/** Combined armour only (battle / merged shop view). */
+function armourTotalSectionHtml(properties = []) {
+  const rating = armourRatingFromProperties(properties);
+  if (rating <= 0) return "";
+  const r = escape(String(rating));
+  return `
+    <div class="tooltip-section">armour</div>
+    <div class="tooltip-armour-line">armour ${r}, reduces damage taken by ${r}</div>`;
+}
+
+/** Character def + equipped item properties (shop roster tooltip). */
+function mergedMemberCombatProperties(member) {
+  const cd = charDef(member?.def_id);
+  const props = [...(cd?.properties || [])];
+  memberItems(member).forEach(({ item }) => {
+    (item.properties || []).forEach((x) => props.push(x));
+  });
+  return props;
+}
+
 function statBonusFromProperties(properties = []) {
   const bonus = { might: 0, reflexes: 0, wisdom: 0, hp: 0 };
   properties.forEach((p) => {
@@ -271,7 +487,7 @@ function propertyText(p) {
       return parts.length ? parts.join(", ") : "no stat bonus";
     }
     case "ranged": return "ranged attack";
-    case "healer": return "heals allies for wisdom";
+    case "healer": return "heals allies for wisdom (1 mana each, 20 mana per battle)";
     case "freeze_on_hit": return "freezes on hit";
     case "summon_on_enemy_death": return `summon ${escape(p.species)} when an enemy dies`;
     case "summon_on_ally_death": return `summon ${escape(p.species)} when an ally dies`;
@@ -283,13 +499,19 @@ function propertyText(p) {
       const s = parts.length ? parts.join(", ") : "stats";
       return `when an ally dies: ${s} for this battle`;
     }
+    case "stats_on_kill": {
+      const parts = statParts(p);
+      const s = parts.length ? parts.join(", ") : "stats";
+      return `when this unit gets a kill: ${s} for this battle`;
+    }
     case "crit_strike": return `${escape(String(p.chance_percent))}% critical strike (double damage)`;
     case "revive_once": return "revive once at full HP";
     case "melee_cleave": {
       const n = Number(p.count);
-      if (n >= 8) return "melee hits all enemies in formation";
-      return `melee hits front ${escape(String(p.count))} enemies`;
+      return `melee hits front ${escape(String(n))} enemies`;
     }
+    case "melee_cleave_bonus":
+      return `+${escape(String(p.plus))} melee cleave target${Number(p.plus) === 1 ? "" : "s"}`;
     case "melee_from_second": return "melee from second formation slot (overrides ranged)";
     case "buff_formation_front": {
       const parts = statParts(p);
@@ -298,13 +520,27 @@ function propertyText(p) {
         `front ally gets ${bonus} while this unit lives`
       );
     }
+    case "armour": {
+      const v = Number(p.value) || 0;
+      const s = escape(String(v));
+      return `armour ${s}, reduces damage taken by ${s}`;
+    }
     default: return escape(p.kind || "property");
   }
 }
 
+function propertyLiHtml(p) {
+  if (p.kind === "armour") {
+    const v = Number(p.value) || 0;
+    const s = escape(String(v));
+    return `<li class="tooltip-prop-li">armour ${s}, reduces damage taken by ${s}</li>`;
+  }
+  return `<li>${propertyText(p)}</li>`;
+}
+
 function propertyList(properties = []) {
   if (!properties.length) return `<div class="tooltip-empty">no properties</div>`;
-  return `<ul class="tooltip-props">${properties.map((p) => `<li>${propertyText(p)}</li>`).join("")}</ul>`;
+  return `<ul class="tooltip-props">${properties.map((p) => propertyLiHtml(p)).join("")}</ul>`;
 }
 
 function statGrid(base, total = base, currentHp = null) {
@@ -320,7 +556,7 @@ function statGrid(base, total = base, currentHp = null) {
 }
 
 function itemIcon(item, label = "") {
-  return `<span class="tooltip-item-icon"><img src="/assets/${escape(item.sprite)}" alt="${escape(item.name)}" />${label ? `<span>${escape(label)}</span>` : ""}</span>`;
+  return `<span class="tooltip-item-icon"><img src="${assetHref(item.sprite)}" alt="${escape(item.name)}" />${label ? `<span>${escape(label)}</span>` : ""}</span>`;
 }
 
 function itemTooltip(item) {
@@ -336,7 +572,7 @@ function characterTooltip(cd) {
   if (!cd) return "";
   return `<div class="tooltip-title">${escape(cd.name)}</div>
     <div class="tooltip-meta">$${cd.cost}</div>
-    <div class="tooltip-hero"><img src="/assets/${escape(cd.sprite)}" alt="${escape(cd.name)}" /></div>
+    <div class="tooltip-hero"><img src="${assetHref(cd.sprite)}" alt="${escape(cd.name)}" /></div>
     ${statGrid(cd)}
     <div class="tooltip-section">properties</div>
     ${propertyList(cd.properties)}`;
@@ -352,8 +588,9 @@ function memberTooltip(member) {
     : `<div class="tooltip-empty">no equipped items</div>`;
   return `<div class="tooltip-title">${escape(cd.name)}</div>
     <div class="tooltip-meta">$${cd.cost} · equipped value $${items.reduce((sum, { item }) => sum + item.cost, cd.cost)}</div>
-    <div class="tooltip-hero"><img src="/assets/${escape(cd.sprite)}" alt="${escape(cd.name)}" /></div>
+    <div class="tooltip-hero"><img src="${assetHref(cd.sprite)}" alt="${escape(cd.name)}" /></div>
     ${statGrid(stats.base, stats.total)}
+    ${armourTotalSectionHtml(mergedMemberCombatProperties(member))}
     <div class="tooltip-section">unit properties</div>
     ${propertyList(cd.properties || [])}
     <div class="tooltip-section">equipped items</div>
@@ -404,10 +641,12 @@ function combatantTooltip(c) {
     : `<div class="tooltip-empty">no equipped items</div>`;
   return `<div class="tooltip-title">${escape(cd?.name || c.def_id)}</div>
     <div class="tooltip-meta">battle unit</div>
-    <div class="tooltip-hero"><img src="/assets/${escape(c.sprite)}" alt="${escape(cd?.name || c.def_id)}" /></div>
+    <div class="tooltip-hero"><img src="${assetHref(c.sprite)}" alt="${escape(cd?.name || c.def_id)}" /></div>
     ${statGrid(base, total, Math.max(0, c.hp || 0))}
+    ${armourTotalSectionHtml(c.properties || [])}
     ${formationFrontAuraTooltipSection(c)}
   ${c.revive_charges ? `<div class="tooltip-section">resurrection</div><div>${escape(String(c.revive_charges))} charge${c.revive_charges === 1 ? "" : "s"} remaining</div>` : ""}
+  ${(c.max_mana || 0) > 0 ? `<div class="tooltip-section">mana</div><div>${escape(String(Math.max(0, c.mana ?? 0)))} / ${escape(String(c.max_mana))}</div>` : ""}
     <div class="tooltip-section">unit properties</div>
     ${propertyList(cd?.properties || [])}
     <div class="tooltip-section">equipped items</div>
@@ -464,33 +703,111 @@ function flash(text, opts = {}) {
   }, duration);
 }
 
-function requestLeaderboard(page = state.leaderboardPage) {
+function loadLeaderboard({ around = false } = {}) {
+  state.lb.entries = [];
+  state.lb.minPage = null;
+  state.lb.maxPage = null;
+  if (around) {
+    state.lb.pendingScroll = "me";
+    send({
+      type: "leaderboard",
+      per_page: LB_PAGE_SIZE,
+      around_player_id: state.playerId,
+    });
+  } else {
+    state.lb.pendingScroll = "top";
+    send({ type: "leaderboard", page: 1, per_page: LB_PAGE_SIZE });
+  }
+}
+
+function loadLbPage(page, position) {
+  if (state.lb.loading) return;
+  if (page < 1 || page > state.lb.pageCount) return;
+  if (state.lb.minPage !== null && page >= state.lb.minPage && page <= state.lb.maxPage) return;
+  state.lb.loading = true;
+  state.lb.pendingScroll = position || null;
   send({ type: "leaderboard", page, per_page: LB_PAGE_SIZE });
 }
 
-function renderLeaderboard(msg) {
-  state.leaderboardPage = msg.page || 1;
-  state.leaderboardPageCount = msg.page_count || 1;
-  const startRank = (state.leaderboardPage - 1) * LB_PAGE_SIZE + 1;
-  $("#lbList").start = startRank;
-  $("#lbList").innerHTML = msg.entries.map(e =>
-    `<li>${escape(e.name)} — wins <b>${e.wins}</b> · best streak ${e.streak}</li>`
-  ).join("") || "<li>no entries yet</li>";
-  $("#lbPageInfo").textContent = `page ${state.leaderboardPage} / ${state.leaderboardPageCount}`;
-  $("#lbPrev").disabled = state.leaderboardPage <= 1;
-  $("#lbNext").disabled = state.leaderboardPage >= state.leaderboardPageCount;
+function handleLeaderboardMsg(msg) {
+  state.lb.loading = false;
+  state.lb.pageCount = msg.page_count || 1;
+  state.lb.perPage = msg.per_page || LB_PAGE_SIZE;
+  if (msg.player_rank != null) state.lb.playerRank = msg.player_rank;
+
+  const startRank = (msg.page - 1) * state.lb.perPage + 1;
+  const incoming = msg.entries.map((e, i) => ({ ...e, rank: startRank + i }));
+
+  if (state.lb.minPage === null) {
+    state.lb.entries = incoming;
+    state.lb.minPage = msg.page;
+    state.lb.maxPage = msg.page;
+  } else if (msg.page === state.lb.maxPage + 1) {
+    state.lb.entries = state.lb.entries.concat(incoming);
+    state.lb.maxPage = msg.page;
+  } else if (msg.page === state.lb.minPage - 1) {
+    state.lb.entries = incoming.concat(state.lb.entries);
+    state.lb.minPage = msg.page;
+  } else {
+    // Discontinuous (e.g. jump to "me") — reset.
+    state.lb.entries = incoming;
+    state.lb.minPage = msg.page;
+    state.lb.maxPage = msg.page;
+  }
+
+  renderLeaderboardList();
+
+  const scroll = $("#lbScroll");
+  const pending = state.lb.pendingScroll;
+  state.lb.pendingScroll = null;
+  requestAnimationFrame(() => {
+    if (pending === "top") {
+      scroll.scrollTop = 0;
+    } else if (pending === "bottom") {
+      scroll.scrollTop = scroll.scrollHeight;
+    } else if (pending === "me" && state.lb.playerRank != null) {
+      const row = scroll.querySelector(`li[data-rank="${state.lb.playerRank}"]`);
+      if (row) {
+        const rowTop = row.offsetTop - scroll.offsetTop;
+        scroll.scrollTop = rowTop - scroll.clientHeight / 2 + row.clientHeight / 2;
+      }
+    }
+  });
+}
+
+function renderLeaderboardList() {
+  const ol = $("#lbList");
+  if (state.lb.entries.length === 0) {
+    ol.innerHTML = `<li class="lb-empty">no entries yet</li>`;
+  } else {
+    ol.innerHTML = state.lb.entries.map((e) => {
+      const isMe = e.player_id && e.player_id === state.playerId;
+      const top3 = e.rank <= 3 ? ` lb-row--top${e.rank}` : "";
+      return `<li class="lb-row${isMe ? " lb-row--me" : ""}${top3}" data-rank="${e.rank}">
+        <span class="lb-rank">#${e.rank}</span>
+        <span class="lb-name">${escape(e.name || "anon")}${isMe ? ' <span class="lb-you">you</span>' : ""}</span>
+        <span class="lb-mmr">${e.mmr}</span>
+        <span class="lb-stats">w<b>${e.wins}</b></span>
+      </li>`;
+    }).join("");
+  }
+  $("#lbTopSentinel").classList.toggle("lb-sentinel--end", state.lb.minPage === 1);
+  $("#lbBottomSentinel").classList.toggle("lb-sentinel--end", state.lb.maxPage >= state.lb.pageCount);
+  if (state.lb.minPage === 1) $("#lbTopSentinel").textContent = "✦ top of the ladder ✦";
+  else $("#lbTopSentinel").textContent = "↑ scroll for higher ranks ↑";
+  if (state.lb.maxPage >= state.lb.pageCount) $("#lbBottomSentinel").textContent = "✦ end of the ladder ✦";
+  else $("#lbBottomSentinel").textContent = "↓ scroll for lower ranks ↓";
+  const info = state.lb.playerRank
+    ? `your rank · #${state.lb.playerRank}`
+    : "no rank yet — finish a run";
+  $("#lbRankInfo").textContent = info;
+  $("#lbMeBtn").disabled = state.lb.playerRank == null;
 }
 
 function renderRun() {
   const r = state.run;
   if (!r) return;
-  if (document.activeElement !== $("#hudNameInput")) {
-    $("#hudNameInput").value = r.name;
-  }
-  $("#hudMoney").textContent = r.money;
-  $("#hudWins").textContent = r.wins;
-  $("#hudLosses").textContent = r.losses;
-  $("#hudStreak").textContent = r.streak;
+  syncRunHudValues();
 
   if (r.phase === "game_over") {
     if (state.battleAnimating) {
@@ -528,7 +845,7 @@ function renderTeam() {
     if (m) {
       const cd = charDef(m.def_id);
       slot.innerHTML = `
-        <img class="portrait" src="/assets/${cd.sprite}" />
+        <img class="portrait" src="${assetHref(cd.sprite)}" />
         <div class="name">${cd.name}</div>
         <div class="stats">⚔${cd.might} ⚡${cd.reflexes} ✦${cd.wisdom} ❤${cd.hp}</div>
         <div class="cost">$${cd.cost}</div>
@@ -548,6 +865,9 @@ function renderTeam() {
       attachTooltip(slot, () => memberTooltip(m));
     } else {
       slot.innerHTML = `<div class="name">empty</div>`;
+      slot.addEventListener("dragover", onTeamSlotDragOver);
+      slot.addEventListener("dragleave", onTeamSlotDragLeave);
+      slot.addEventListener("drop", onTeamSlotDrop);
     }
     slot.onclick = () => onTeamSlotClick(i, !!m);
     wrap.appendChild(slot);
@@ -607,7 +927,7 @@ function renderItemSockets(teamIdx, member) {
     if (itemId) {
       const item = itemDef(itemId);
       socket.draggable = true;
-      socket.innerHTML = item ? `<img src="/assets/${item.sprite}" alt="${escape(item.name)}" />` : label;
+      socket.innerHTML = item ? `<img src="${assetHref(item.sprite)}" alt="${escape(item.name)}" />` : label;
       if (item) attachTooltip(socket, () => itemTooltip(item));
       socket.addEventListener("dragstart", (e) => {
         e.stopPropagation();
@@ -634,6 +954,26 @@ function onCharacterDragStart(e) {
 function onTeamSlotDragOver(e) {
   const data = getDrag(e);
   if (!data) return;
+  const to = parseInt(e.currentTarget.dataset.idx, 10);
+  if (data.type === "shop_character") {
+    const max = state.consts.max_team || 8;
+    const team = state.run.build.team;
+    if (team.length >= max || Number.isNaN(to)) return;
+    const hasMember = !!team[to];
+    if (!hasMember && to < team.length) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    e.currentTarget.classList.add("drag-over");
+    return;
+  }
+  if (data.type === "character") {
+    if (data.team === to || Number.isNaN(to)) return;
+    if (!state.run.build.team[data.team] || !state.run.build.team[to]) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    e.currentTarget.classList.add("drag-over");
+    return;
+  }
   e.preventDefault();
   e.dataTransfer.dropEffect = "move";
   e.currentTarget.classList.add("drag-over");
@@ -649,6 +989,23 @@ function onTeamSlotDrop(e) {
     if (data.team === to) return;
     if (!state.run.build.team[data.team] || !state.run.build.team[to]) return;
     send({ type: "reorder", from: data.team, to });
+  } else if (data.type === "shop_character") {
+    const max = state.consts.max_team || 8;
+    const team = state.run.build.team;
+    if (team.length >= max) {
+      flash("team full", { variant: "info" });
+      return;
+    }
+    const hasMember = !!team[to];
+    const insertAt = hasMember ? to : team.length;
+    const cid = state.run.shop.characters[data.slot];
+    const cd = charDef(cid);
+    const line = cd ? insufficientMoneyLine(cd.cost) : null;
+    if (line) {
+      flash(line, { variant: "error", shakeMoney: true, duration: 3600 });
+      return;
+    }
+    send({ type: "buy_character", slot: data.slot, target: insertAt });
   } else if (data.type === "shop_item") {
     if (!state.run.build.team[to]) return;
     const sid = state.run.shop.items[data.slot];
@@ -674,7 +1031,14 @@ function onItemSocketDragOver(e) {
   const data = getDrag(e);
   if (!data || (data.type !== "shop_item" && data.type !== "team_item")) return;
   const targetSlot = e.currentTarget.dataset.itemSlot;
-  if (!slotAccepts(targetSlot, data.itemSlot)) return;
+  const target = parseInt(e.currentTarget.dataset.teamIdx, 10);
+  const member = state.run.build.team[target];
+  if (!member) return;
+  const filled = e.currentTarget.classList.contains("filled");
+  const destOk =
+    (slotAccepts(targetSlot, data.itemSlot) && !filled) ||
+    firstFreeSlot(member, data.itemSlot);
+  if (!destOk) return;
   e.preventDefault();
   e.stopPropagation();
   e.dataTransfer.dropEffect = "move";
@@ -682,14 +1046,41 @@ function onItemSocketDragOver(e) {
 }
 function onItemSocketDragLeave(e) { e.currentTarget.classList.remove("drag-over"); }
 function onItemSocketDrop(e) {
-  e.preventDefault();
-  e.stopPropagation();
   const data = getDrag(e);
   const target = parseInt(e.currentTarget.dataset.teamIdx, 10);
   const targetSlot = e.currentTarget.dataset.itemSlot;
   e.currentTarget.classList.remove("drag-over");
-  if (!data || !slotAccepts(targetSlot, data.itemSlot)) return;
-  if (e.currentTarget.classList.contains("filled")) { flash("item socket taken", { variant: "info" }); return; }
+  if (!data || (data.type !== "shop_item" && data.type !== "team_item")) return;
+
+  const member = state.run.build.team[target];
+  if (!member) return;
+
+  const filled = e.currentTarget.classList.contains("filled");
+  let destSlot =
+    slotAccepts(targetSlot, data.itemSlot) && !filled
+      ? targetSlot
+      : firstFreeSlot(member, data.itemSlot);
+
+  if (!destSlot) {
+    if (filled && slotAccepts(targetSlot, data.itemSlot)) {
+      flash("item socket taken", { variant: "info" });
+    } else {
+      flash("no open socket", { variant: "info" });
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+
+  if (data.type === "team_item" && data.team === target && data.slot === destSlot) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+
+  e.preventDefault();
+  e.stopPropagation();
+
   if (data.type === "shop_item") {
     const sid = state.run.shop.items[data.slot];
     const def = itemDef(sid);
@@ -698,9 +1089,9 @@ function onItemSocketDrop(e) {
       flash(line, { variant: "error", shakeMoney: true, duration: 3600 });
       return;
     }
-    send({ type: "buy_item_to_slot", slot: data.slot, target, target_slot: targetSlot });
+    send({ type: "buy_item_to_slot", slot: data.slot, target, target_slot: destSlot });
   } else if (data.type === "team_item") {
-    send({ type: "move_item", from_team: data.team, from_slot: data.slot, to_team: target, to_slot: targetSlot });
+    send({ type: "move_item", from_team: data.team, from_slot: data.slot, to_team: target, to_slot: destSlot });
   }
 }
 
@@ -714,12 +1105,19 @@ function renderShop() {
     const cantAfford = cd.cost > bal;
     c.className = "card" + (cantAfford ? " cant-afford" : "");
     c.innerHTML = `
-      <img src="/assets/${cd.sprite}" />
+      <img src="${assetHref(cd.sprite)}" />
       <div class="name">${cd.name}</div>
       <div class="stats">⚔${cd.might} ⚡${cd.reflexes} ✦${cd.wisdom} ❤${cd.hp}</div>
       <div class="cost">$${cd.cost}</div>
     `;
     attachTooltip(c, () => characterTooltip(cd));
+    c.draggable = !cantAfford;
+    c.addEventListener("dragstart", (e) => {
+      hideTooltip();
+      setDrag(e, { type: "shop_character", slot: i });
+      c.classList.add("dragging");
+    });
+    c.addEventListener("dragend", onDragEnd);
     c.onclick = () => {
       if (cantAfford) {
         flash(insufficientMoneyLine(cd.cost), {
@@ -729,7 +1127,7 @@ function renderShop() {
         });
         return;
       }
-      send({ type: "buy_character", slot: i });
+      send({ type: "buy_character", slot: i, target: state.run.build.team.length });
     };
     sc.appendChild(c);
   });
@@ -745,7 +1143,7 @@ function renderShop() {
       (cantAfford ? " cant-afford" : "");
     c.draggable = !cantAfford;
     c.innerHTML = `
-      <img src="/assets/${it.sprite}" />
+      <img src="${assetHref(it.sprite)}" />
       <div class="name">${it.name}</div>
       <div class="cost">$${it.cost}</div>
       <div class="stats">${it.slot}</div>
@@ -818,6 +1216,11 @@ function wireInventoryDrop() {
 // Wire UI
 $("#nameInput").value = state.nickname;
 $("#hudNameInput").value = state.nickname;
+ensureBgmAudio();
+$("#bgmMuteBtn").onclick = () => setBgmMuted(!(state.bgmMuted || state.bgmVolume <= 0));
+$("#bgmVolume").addEventListener("input", (e) => setBgmVolume(e.currentTarget.value));
+window.addEventListener("pointerdown", startBgm, { once: true });
+window.addEventListener("keydown", startBgm, { once: true });
 $("#saveStartNicknameBtn").onclick = () => {
   setNickname($("#nameInput").value);
   flash("nickname saved", { variant: "info" });
@@ -834,18 +1237,38 @@ $("#hudNameInput").addEventListener("keydown", (e) => {
   }
 });
 $("#newRunBtn").onclick = () => {
-  setNickname($("#nameInput").value, false);
-  send({ type: "new_run", player_id: state.playerId, name: state.nickname });
+  startNewRun();
 };
-$("#resumeBtn").onclick = () => {
-  const id = localStorage.getItem(RUN_ID_KEY);
-  if (!id) return flash("no saved run", { variant: "info" });
-  send({ type: "resume", run_id: id });
+$("#lbTopBtn").onclick = () => loadLeaderboard({ around: false });
+$("#lbMeBtn").onclick = () => loadLeaderboard({ around: true });
+$("#lbUpBtn").onclick = () => {
+  if (state.lb.minPage > 1) loadLbPage(state.lb.minPage - 1, "top");
+  else $("#lbScroll").scrollTop = 0;
 };
-$("#lbBtn").onclick = () => requestLeaderboard(1);
-$("#lbBack").onclick = () => { if (state.run) renderRun(); else show("start"); };
-$("#lbPrev").onclick = () => requestLeaderboard(Math.max(1, state.leaderboardPage - 1));
-$("#lbNext").onclick = () => requestLeaderboard(Math.min(state.leaderboardPageCount, state.leaderboardPage + 1));
+$("#lbDownBtn").onclick = () => {
+  if (state.lb.maxPage < state.lb.pageCount) loadLbPage(state.lb.maxPage + 1, "bottom");
+  else $("#lbScroll").scrollTop = $("#lbScroll").scrollHeight;
+};
+{
+  const scroll = $("#lbScroll");
+  scroll.addEventListener("scroll", () => {
+    if (state.lb.loading) return;
+    const nearTop = scroll.scrollTop < 80;
+    const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+    if (nearBottom && state.lb.maxPage < state.lb.pageCount) {
+      loadLbPage(state.lb.maxPage + 1);
+    } else if (nearTop && state.lb.minPage > 1) {
+      const before = scroll.scrollHeight;
+      loadLbPage(state.lb.minPage - 1);
+      // After prepend, restore relative scroll position so view doesn't jump.
+      const obs = new MutationObserver(() => {
+        scroll.scrollTop += scroll.scrollHeight - before;
+        obs.disconnect();
+      });
+      obs.observe($("#lbList"), { childList: true });
+    }
+  });
+}
 $("#rerollBtn").onclick = () => {
   const line = insufficientRerollLine();
   if (line) {
@@ -855,9 +1278,27 @@ $("#rerollBtn").onclick = () => {
   send({ type: "reroll" });
 };
 $("#battleBtn").onclick = () => send({ type: "battle" });
-$("#nextRoundBtn").onclick = () => send({ type: "next_round" });
-$("#goRestart").onclick = () => { localStorage.removeItem(RUN_ID_KEY); state.run = null; show("start"); };
-$("#goLb").onclick = () => requestLeaderboard(1);
+$("#quitRunBtn").onclick = openQuitRunModal;
+$("#cancelQuitRunBtn").onclick = closeQuitRunModal;
+$("#confirmQuitRunBtn").onclick = () => {
+  closeQuitRunModal();
+  startNewRun();
+};
+$("#quitRunModal").addEventListener("click", (e) => {
+  if (e.target.matches("[data-close-quit-modal]")) closeQuitRunModal();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#quitRunModal").classList.contains("hidden")) {
+    closeQuitRunModal();
+  }
+});
+$("#nextRoundBtn").onclick = () => renderRun();
+$("#goRestart").onclick = () => {
+  state.run = null;
+  state.lastBattle = null;
+  state.battleAnimating = false;
+  show("start");
+};
 
 wireInventoryDrop();
 show("start");

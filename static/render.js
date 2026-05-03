@@ -1,5 +1,9 @@
 // Canvas renderer for combat playback. Plays through events with simple animation.
 
+import { mountBasePath } from "./path-base.js";
+
+const BASE_PATH = mountBasePath(import.meta);
+
 const SPRITE_W = 96;
 const FLOOR_Y = 240;
 const CENTER_GAP = 80;
@@ -7,7 +11,7 @@ const CENTER_GAP = 80;
 const imgCache = new Map();
 function img(src) {
   if (imgCache.has(src)) return imgCache.get(src);
-  const i = new Image(); i.src = `/assets/${src}`;
+  const i = new Image(); i.src = `${BASE_PATH}/assets/${src}`;
   imgCache.set(src, i); return i;
 }
 
@@ -31,6 +35,8 @@ class Sprite {
     this.wisdom = c.wisdom;
     this.properties = c.properties || [];
     this.revive_charges = c.revive_charges ?? 0;
+    this.mana = c.mana ?? 0;
+    this.max_mana = c.max_mana ?? 0;
     this.applied_front_might = c.applied_front_might ?? 0;
     this.applied_front_reflexes = c.applied_front_reflexes ?? 0;
     this.applied_front_wisdom = c.applied_front_wisdom ?? 0;
@@ -81,13 +87,39 @@ function drawSprite(ctx, s, t) {
     (s.applied_front_wisdom || 0) +
     (s.formation_hp_bonus || 0);
   if (auraAmt > 0) {
-    ctx.strokeStyle = "rgba(255, 243, 108, 0.9)";
-    ctx.lineWidth = 3;
-    ctx.shadowColor = "rgba(74, 242, 255, 0.85)";
-    ctx.shadowBlur = 14;
+    const cx = x + w / 2;
+    const cy = y + h / 2 - 10;
+    const pulse = (Math.sin(t / 170 + s.uid) + 1) / 2;
+    const strands = 7;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.shadowColor = "rgba(255, 243, 108, 0.9)";
+    ctx.shadowBlur = 18 + pulse * 10;
+    for (let n = 0; n < strands; n++) {
+      const a = t / 520 + s.uid * 0.37 + n * (Math.PI * 2 / strands);
+      const rx = w * (0.36 + 0.04 * Math.sin(t / 240 + n));
+      const ry = h * (0.46 + 0.05 * Math.cos(t / 210 + n));
+      const sx = cx + Math.cos(a) * rx;
+      const sy = cy + Math.sin(a) * ry;
+      const ex = cx + Math.cos(a + 0.7) * (rx + 10);
+      const ey = cy + Math.sin(a + 0.7) * (ry + 8);
+      ctx.strokeStyle = n % 2
+        ? `rgba(74, 242, 255, ${0.35 + pulse * 0.25})`
+        : `rgba(255, 243, 108, ${0.45 + pulse * 0.3})`;
+      ctx.lineWidth = 2 + pulse * 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(cx + Math.cos(a + 0.35) * (rx + 18), cy + Math.sin(a + 0.35) * (ry + 18), ex, ey);
+      ctx.stroke();
+    }
+    const halo = ctx.createRadialGradient(cx, cy, 8, cx, cy, w * 0.7);
+    halo.addColorStop(0, "rgba(255, 243, 108, 0.14)");
+    halo.addColorStop(0.45, "rgba(74, 242, 255, 0.08)");
+    halo.addColorStop(1, "transparent");
+    ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.ellipse(x + w / 2, y + h / 2 - 8, w * 0.52, h * 0.58, 0, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.ellipse(cx, cy, w * 0.7, h * 0.72, 0, 0, Math.PI * 2);
+    ctx.fill();
     ctx.shadowBlur = 0;
   }
   if (s.flashUntil > t) ctx.filter = "brightness(2.5) hue-rotate(80deg)";
@@ -120,14 +152,35 @@ function drawSprite(ctx, s, t) {
     }
   }
 
-  // HP bar
+  const maxMana = s.max_mana || 0;
+  const mana = Math.max(0, s.mana ?? 0);
+  const manaBarLift = maxMana > 0 ? 12 : 0;
+
+  // HP / mana bars — narrower and higher so rows don’t overlap sprites or each other
+  const barW = w * 0.62;
+  const barX = x + (w - barW) / 2;
+  const hpBarH = 5;
+
   const effMax = Math.max(1, s.max_hp + (s.formation_hp_bonus || 0));
   const pct = Math.max(0, s.hp) / effMax;
-  ctx.fillStyle = "#000"; ctx.fillRect(x, y - 12, w, 6);
+  const hpBarY = y - 32 - manaBarLift;
+  const hpLblY = y - 37 - manaBarLift;
+  ctx.fillStyle = "#000"; ctx.fillRect(barX, hpBarY, barW, hpBarH);
   ctx.fillStyle = pct > 0.5 ? "#4af2ff" : pct > 0.25 ? "#fff36c" : "#ff5cf2";
-  ctx.fillRect(x, y - 12, w * pct, 6);
+  ctx.fillRect(barX, hpBarY, barW * pct, hpBarH);
   ctx.fillStyle = "#fff"; ctx.font = "12px monospace"; ctx.textAlign = "center";
-  ctx.fillText(`${Math.max(0, s.hp)}`, x + w/2, y - 16);
+  ctx.fillText(`${Math.max(0, s.hp)}`, barX + barW / 2, hpLblY);
+
+  if (maxMana > 0) {
+    const manaPct = mana / Math.max(1, maxMana);
+    const manaBarY = y - 18;
+    const manaBarH = 4;
+    ctx.fillStyle = "#000"; ctx.fillRect(barX, manaBarY, barW, manaBarH);
+    ctx.fillStyle = manaPct > 0.35 ? "#9b7dff" : manaPct > 0 ? "#c8b8ff" : "#555";
+    ctx.fillRect(barX, manaBarY, barW * manaPct, manaBarH);
+    ctx.font = "10px monospace";
+    ctx.fillText(`${mana}`, barX + barW / 2, y - 8);
+  }
 }
 
 function drawProjectile(ctx, p) {
@@ -140,6 +193,102 @@ function drawProjectile(ctx, p) {
   } else {
     ctx.fillStyle = "#fff36c"; ctx.beginPath(); ctx.arc(p.x + 16, p.y + 16, 8, 0, Math.PI*2); ctx.fill();
   }
+}
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const rand = (min, max) => min + Math.random() * (max - min);
+
+function createBattleAudio() {
+  let ctx = null;
+  let unavailable = false;
+
+  function ensure() {
+    if (unavailable) return null;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) {
+        unavailable = true;
+        return null;
+      }
+      ctx ||= new AudioCtx();
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      return ctx;
+    } catch {
+      unavailable = true;
+      return null;
+    }
+  }
+
+  function tone(freq, duration = 0.12, volume = 0.05, type = "sine", slideTo = null) {
+    const audio = ensure();
+    if (!audio) return;
+    const now = audio.currentTime;
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, now);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), now + duration);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+  }
+
+  function noise(duration = 0.12, volume = 0.06, filter = "bandpass", freq = 1200) {
+    const audio = ensure();
+    if (!audio) return;
+    const buffer = audio.createBuffer(1, Math.max(1, Math.floor(audio.sampleRate * duration)), audio.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      const fade = 1 - i / data.length;
+      data[i] = (Math.random() * 2 - 1) * fade;
+    }
+    const src = audio.createBufferSource();
+    const gain = audio.createGain();
+    const biquad = audio.createBiquadFilter();
+    src.buffer = buffer;
+    biquad.type = filter;
+    biquad.frequency.value = freq;
+    gain.gain.value = volume;
+    src.connect(biquad).connect(gain).connect(audio.destination);
+    src.start();
+  }
+
+  return {
+    hit(critical = false) {
+      noise(critical ? 0.16 : 0.09, critical ? 0.09 : 0.055, "bandpass", critical ? 1600 : 950);
+      tone(critical ? 180 : 250, critical ? 0.18 : 0.1, critical ? 0.075 : 0.04, "sawtooth", critical ? 70 : 150);
+    },
+    miss() { noise(0.12, 0.035, "highpass", 1800); },
+    projectile() { tone(620, 0.08, 0.025, "triangle", 980); },
+    heal() {
+      tone(660, 0.12, 0.04, "sine", 990);
+      setTimeout(() => tone(990, 0.12, 0.035, "sine", 1320), 55);
+    },
+    freeze() {
+      noise(0.18, 0.055, "highpass", 2600);
+      tone(1200, 0.2, 0.035, "triangle", 420);
+    },
+    death() {
+      tone(110, 0.24, 0.08, "sawtooth", 45);
+      noise(0.2, 0.045, "lowpass", 350);
+    },
+    revive() {
+      tone(330, 0.12, 0.04, "sine", 660);
+      setTimeout(() => tone(880, 0.16, 0.045, "triangle", 1320), 70);
+    },
+    buff() {
+      tone(520, 0.1, 0.035, "triangle", 820);
+      setTimeout(() => tone(1040, 0.12, 0.03, "sine", 1560), 45);
+    },
+    summon() {
+      noise(0.14, 0.04, "bandpass", 700);
+      tone(420, 0.14, 0.035, "square", 760);
+    },
+    end() { tone(220, 0.18, 0.04, "triangle", 440); },
+  };
 }
 
 function canvasPoint(canvas, ev) {
@@ -184,13 +333,67 @@ function hitSprite(list, point) {
   return null;
 }
 
+const ATTACK_RESOLUTION_EVENTS = new Set(["hp", "revive", "freeze", "death", "stat_sync", "summon"]);
+
+function isGroupedAttack(ev, group) {
+  return ev?.type === "attack" && ev.simultaneous_group != null && ev.simultaneous_group === group;
+}
+
+function groupSimultaneousAttacks(rawEvents) {
+  const grouped = [];
+  for (let idx = 0; idx < rawEvents.length;) {
+    const ev = rawEvents[idx];
+    if (ev?.type !== "attack" || ev.simultaneous_group == null) {
+      grouped.push(ev);
+      idx++;
+      continue;
+    }
+
+    const group = ev.simultaneous_group;
+    const attacks = [ev];
+    const resolutions = [];
+    let cursor = idx + 1;
+
+    while (cursor < rawEvents.length) {
+      const chunk = [];
+      while (cursor < rawEvents.length && ATTACK_RESOLUTION_EVENTS.has(rawEvents[cursor]?.type)) {
+        chunk.push(rawEvents[cursor]);
+        cursor++;
+      }
+
+      if (isGroupedAttack(rawEvents[cursor], group)) {
+        resolutions.push(...chunk);
+        attacks.push(rawEvents[cursor]);
+        cursor++;
+        continue;
+      }
+
+      resolutions.push(...chunk);
+      break;
+    }
+
+    if (attacks.length > 1) {
+      grouped.push({ type: "attack_batch", attacks, resolutions });
+      idx = cursor;
+    } else {
+      grouped.push(ev);
+      idx++;
+    }
+  }
+  return grouped;
+}
+
 export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip = {}) {
   if (canvas.__battleTooltipCleanup) canvas.__battleTooltipCleanup();
   const ctx = canvas.getContext("2d");
-  const events = battleMsg.events.slice();
+  const events = groupSimultaneousAttacks(battleMsg.events);
   const spritesById = new Map();
   let leftList = [], rightList = [];
   let projectiles = [];
+  let particles = [];
+  let floaters = [];
+  let screenShake = 0;
+  const audio = createBattleAudio();
   let log = (text) => {
     const el = document.getElementById("battleLog");
     if (!el) return;
@@ -203,6 +406,168 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   let last = performance.now();
   let done = false;
   let hovered = null;
+  const battleStartedAt = last;
+
+  function playbackSpeed(now = performance.now()) {
+    const elapsed = Math.max(0, now - battleStartedAt) / 1000;
+    const eventRamp = Math.max(0, i - 1) * 0.018;
+    return clamp(1 + elapsed * 0.055 + eventRamp, 1, 2.75);
+  }
+
+  function scaledDuration(ms, now = performance.now()) {
+    return ms / playbackSpeed(now);
+  }
+
+  function eventDelay(ev, now) {
+    const heavy = ev.type === "attack" || ev.type === "attack_batch" || ev.type === "death" || ev.type === "freeze" || ev.type === "revive";
+    return (heavy ? 380 : 120) / playbackSpeed(now);
+  }
+
+  function motionRatio(base, dtScaled) {
+    return 1 - Math.pow(1 - base, dtScaled / 16.67);
+  }
+
+  function spriteAnchor(s) {
+    return { x: s.x + 48, y: s.y - 58 };
+  }
+
+  function addShake(amount) {
+    screenShake = Math.max(screenShake, amount);
+  }
+
+  function emitFloater(s, text, opts = {}) {
+    if (!s) return;
+    const p = spriteAnchor(s);
+    floaters.push({
+      text,
+      x: p.x + rand(-16, 16),
+      y: p.y + rand(-10, 8),
+      vx: opts.vx ?? rand(-0.18, 0.18),
+      vy: opts.vy ?? -0.75,
+      color: opts.color ?? "#fff36c",
+      stroke: opts.stroke ?? "rgba(0,0,0,0.8)",
+      size: opts.size ?? 18,
+      ttl: opts.ttl ?? 720,
+      life: 0,
+      wobble: rand(0, Math.PI * 2),
+    });
+    if (floaters.length > 48) floaters.splice(0, floaters.length - 48);
+  }
+
+  function emitParticles(x, y, count, opts = {}) {
+    for (let n = 0; n < count; n++) {
+      const angle = opts.angle ?? rand(0, Math.PI * 2);
+      const spread = opts.spread ?? Math.PI * 2;
+      const a = angle + rand(-spread / 2, spread / 2);
+      const speed = rand(opts.minSpeed ?? 0.7, opts.maxSpeed ?? 3.2);
+      particles.push({
+        x: x + rand(-(opts.jitter ?? 6), opts.jitter ?? 6),
+        y: y + rand(-(opts.jitter ?? 6), opts.jitter ?? 6),
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed,
+        gravity: opts.gravity ?? 0.035,
+        color: opts.altColor && Math.random() > 0.55 ? opts.altColor : opts.color ?? "#fff36c",
+        size: rand(opts.minSize ?? 2, opts.maxSize ?? 5),
+        ttl: rand(opts.minTtl ?? 260, opts.maxTtl ?? 520),
+        life: 0,
+        glow: opts.glow ?? 0,
+        layer: opts.layer ?? "front",
+      });
+    }
+    if (particles.length > 220) particles.splice(0, particles.length - 220);
+  }
+
+  function emitHit(t, ev, x = null, y = null) {
+    if (!t) return;
+    const p = x == null || y == null ? spriteAnchor(t) : { x, y };
+    if (ev.hit) {
+      emitFloater(t, `-${ev.damage}`, {
+        color: ev.critical ? "#ff5cf2" : "#fff36c",
+        size: ev.critical ? 28 : 20,
+        ttl: ev.critical ? 860 : 690,
+        vy: ev.critical ? -1.1 : -0.82,
+      });
+      emitParticles(p.x, p.y, ev.critical ? 28 : 16, {
+        color: ev.critical ? "#ff5cf2" : "#fff36c",
+        altColor: ev.critical ? "#4af2ff" : "#ff8a5c",
+        minSpeed: 1.2,
+        maxSpeed: ev.critical ? 5.2 : 3.6,
+        minSize: 2,
+        maxSize: ev.critical ? 7 : 5,
+        glow: ev.critical ? 16 : 8,
+      });
+      addShake(ev.critical ? 10 : 5);
+      audio.hit(ev.critical);
+    } else {
+      emitFloater(t, "MISS", {
+        color: "#c8b8ff",
+        size: 18,
+        ttl: 620,
+        vx: t.side === 0 ? -0.42 : 0.42,
+        vy: -0.48,
+      });
+      emitParticles(p.x, p.y, 8, {
+        color: "#c8b8ff",
+        minSpeed: 1,
+        maxSpeed: 2.6,
+        gravity: 0,
+        minTtl: 180,
+        maxTtl: 340,
+      });
+      audio.miss();
+    }
+  }
+
+  function emitHeal(t, amount) {
+    if (!t) return;
+    const p = spriteAnchor(t);
+    emitFloater(t, `+${amount}`, { color: "#66ff99", size: 20, ttl: 760, vy: -0.72 });
+    emitParticles(p.x, p.y + 10, 20, {
+      color: "#66ff99",
+      altColor: "#4af2ff",
+      minSpeed: 0.5,
+      maxSpeed: 2.2,
+      gravity: -0.02,
+      minSize: 2,
+      maxSize: 6,
+      glow: 12,
+    });
+    audio.heal();
+  }
+
+  function emitStatus(t, text, color) {
+    if (!t) return;
+    emitFloater(t, text, { color, size: 18, ttl: 760, vy: -0.62 });
+  }
+
+  function emitActivation(t, label = "POWER UP") {
+    if (!t) return;
+    const p = spriteAnchor(t);
+    const now = performance.now();
+    t.flashUntil = now + scaledDuration(320, now);
+    emitFloater(t, label, {
+      color: "#fff36c",
+      stroke: "rgba(68, 20, 98, 0.95)",
+      size: label.length > 8 ? 16 : 18,
+      ttl: 820,
+      vy: -0.78,
+    });
+    emitParticles(p.x, p.y - 2, 26, {
+      color: "#fff36c",
+      altColor: "#ff5cf2",
+      minSpeed: 0.5,
+      maxSpeed: 3.4,
+      gravity: -0.018,
+      minSize: 2,
+      maxSize: 7,
+      minTtl: 360,
+      maxTtl: 720,
+      glow: 18,
+      layer: "front",
+    });
+    addShake(3);
+    audio.buff();
+  }
 
   const onMouseMove = (ev) => {
     const point = canvasPoint(canvas, ev);
@@ -260,26 +625,64 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
             target: ev.target,
             hit: ev.hit,
             damage: ev.damage,
+            critical: ev.critical,
             t: 0,
           });
+          audio.projectile();
           log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}${ev.critical ? " (crit!)" : ""}` : `${a.def_id} misses ${t.def_id}`);
         } else {
           // melee lunge
           const dir = a.side === 0 ? 1 : -1;
           a.x += 24 * dir;
-          setTimeout(() => { a.x -= 24 * dir; }, 120);
+          setTimeout(() => { a.x -= 24 * dir; }, scaledDuration(120));
           if (ev.hit) {
-            t.flashUntil = performance.now() + 200;
+            const now = performance.now();
+            t.flashUntil = now + scaledDuration(200, now);
             t.shake = 6;
-            setTimeout(() => { t.shake = 0; }, 200);
+            setTimeout(() => { t.shake = 0; }, scaledDuration(200, now));
           }
+          emitHit(t, ev);
           log(ev.hit ? `${a.def_id} hits ${t.def_id} for ${ev.damage}${ev.critical ? " (crit!)" : ""}` : `${a.def_id} misses ${t.def_id}`);
         }
+        break;
+      }
+      case "attack_batch": {
+        const first = ev.attacks[0];
+        const a = spritesById.get(first?.attacker);
+        if (!a) break;
+        const dir = a.side === 0 ? 1 : -1;
+        a.x += 24 * dir;
+        setTimeout(() => { a.x -= 24 * dir; }, scaledDuration(120));
+
+        ev.attacks.forEach(atk => {
+          const t = spritesById.get(atk.target);
+          if (!t) return;
+          if (atk.hit) {
+            const now = performance.now();
+            t.flashUntil = now + scaledDuration(200, now);
+            t.shake = 6;
+            setTimeout(() => { t.shake = 0; }, scaledDuration(200, now));
+          }
+          emitHit(t, atk);
+          log(atk.hit ? `${a.def_id} hits ${t.def_id} for ${atk.damage}${atk.critical ? " (crit!)" : ""}` : `${a.def_id} misses ${t.def_id}`);
+        });
+        ev.resolutions.forEach(applyEvent);
         break;
       }
       case "stat_sync": {
         const s = spritesById.get(ev.uid);
         if (s) {
+          const deltaMight = ev.might - s.might;
+          const deltaReflexes = ev.reflexes - s.reflexes;
+          const deltaWisdom = ev.wisdom - s.wisdom;
+          const deltaMaxHp = ev.max_hp - s.max_hp;
+          const positiveStats = [deltaMight, deltaReflexes, deltaWisdom, deltaMaxHp].filter(n => n > 0);
+          const showActivation =
+            positiveStats.length > 0 &&
+            ev.applied_front_might === s.applied_front_might &&
+            ev.applied_front_reflexes === s.applied_front_reflexes &&
+            ev.applied_front_wisdom === s.applied_front_wisdom &&
+            (ev.formation_hp_bonus || 0) === (s.formation_hp_bonus || 0);
           s.might = ev.might;
           s.reflexes = ev.reflexes;
           s.wisdom = ev.wisdom;
@@ -289,6 +692,12 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
           s.applied_front_might = ev.applied_front_might ?? 0;
           s.applied_front_reflexes = ev.applied_front_reflexes ?? 0;
           s.applied_front_wisdom = ev.applied_front_wisdom ?? 0;
+          if (showActivation) {
+            const label = positiveStats.every(n => n === positiveStats[0]) && positiveStats.length >= 3
+              ? `ALL +${positiveStats[0]}`
+              : "POWER UP";
+            emitActivation(s, label);
+          }
         }
         break;
       }
@@ -296,20 +705,64 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         const s = spritesById.get(ev.uid); if (s) s.hp = ev.hp;
         break;
       }
+      case "mana": {
+        const s = spritesById.get(ev.uid);
+        if (s) s.mana = ev.mana;
+        break;
+      }
       case "freeze": {
-        const s = spritesById.get(ev.target); if (s) s.frozenUntil = performance.now() + 1200;
+        const s = spritesById.get(ev.target);
+        if (s) {
+          const now = performance.now();
+          const p = spriteAnchor(s);
+          s.frozenUntil = now + scaledDuration(1200, now);
+          emitStatus(s, "FROZEN", "#8eeaff");
+          emitParticles(p.x, p.y, 30, {
+            color: "#8eeaff",
+            altColor: "#ffffff",
+            minSpeed: 1.1,
+            maxSpeed: 4.4,
+            gravity: 0.006,
+            minSize: 2,
+            maxSize: 6,
+            glow: 14,
+          });
+          addShake(6);
+          audio.freeze();
+        }
         log(`${s?.def_id ?? "?"} frozen!`);
         break;
       }
       case "heal": {
         const a = spritesById.get(ev.healer);
         const t = spritesById.get(ev.target);
-        if (t) { t.flashUntil = performance.now() + 300; }
+        if (t) {
+          const now = performance.now();
+          t.flashUntil = now + scaledDuration(300, now);
+          emitHeal(t, ev.amount);
+        }
         log(`${a?.def_id} heals ${t?.def_id} for ${ev.amount}`);
         break;
       }
       case "death": {
-        const s = spritesById.get(ev.uid); if (s) { s.dead = true; }
+        const s = spritesById.get(ev.uid);
+        if (s) {
+          const p = spriteAnchor(s);
+          emitStatus(s, "KO", "#ff8a5c");
+          emitParticles(p.x, p.y + 12, 36, {
+            color: "#ff8a5c",
+            altColor: "#ff5cf2",
+            minSpeed: 0.8,
+            maxSpeed: 4.8,
+            gravity: 0.05,
+            minSize: 3,
+            maxSize: 8,
+            glow: 10,
+          });
+          addShake(8);
+          audio.death();
+          s.dead = true;
+        }
         log(`${s?.def_id ?? "?"} falls`);
         // re-layout remaining
         leftList = leftList.filter(x => !x.dead);
@@ -322,7 +775,22 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         if (s) {
           s.hp = ev.hp;
           s.revive_charges = Math.max(0, (s.revive_charges || 0) - 1);
-          s.flashUntil = performance.now() + 350;
+          const now = performance.now();
+          const p = spriteAnchor(s);
+          s.flashUntil = now + scaledDuration(350, now);
+          emitStatus(s, "REVIVE", "#66ff99");
+          emitParticles(p.x, p.y, 32, {
+            color: "#66ff99",
+            altColor: "#fff36c",
+            minSpeed: 0.6,
+            maxSpeed: 3.2,
+            gravity: -0.025,
+            minSize: 2,
+            maxSize: 7,
+            glow: 18,
+          });
+          addShake(4);
+          audio.revive();
         }
         log(`${s?.def_id ?? "?"} resurrects!`);
         break;
@@ -338,43 +806,141 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
           list.push(s);
         }
         layout(leftList, rightList, canvas);
+        emitStatus(s, "SUMMON", "#c8b8ff");
+        emitParticles(s.x + 48, s.y - 48, 28, {
+          color: "#c8b8ff",
+          altColor: "#4af2ff",
+          minSpeed: 0.6,
+          maxSpeed: 3,
+          gravity: -0.01,
+          minSize: 3,
+          maxSize: 8,
+          glow: 12,
+          layer: "back",
+        });
+        audio.summon();
         log(`summoned ${s.def_id}`);
+        break;
+      }
+      case "lock_breaker": {
+        const result = ev.winner === 0 ? "you win" : ev.winner === 1 ? "enemy wins" : "draw";
+        log(`lock breaker: ${result} by living gold ${ev.left_living_gold}-${ev.right_living_gold}`);
         break;
       }
       case "end": {
         done = true;
+        audio.end();
         break;
       }
     }
   }
 
+  function updateParticles(dtScaled) {
+    particles = particles.filter(p => {
+      const frame = dtScaled / 16.67;
+      p.life += dtScaled;
+      p.x += p.vx * frame;
+      p.y += p.vy * frame;
+      p.vy += p.gravity * frame;
+      p.size *= Math.pow(0.985, frame);
+      return p.life < p.ttl && p.size > 0.3;
+    });
+  }
+
+  function drawParticles(ctx, layer) {
+    particles.forEach(p => {
+      if (p.layer !== layer) return;
+      const alpha = clamp(1 - p.life / p.ttl, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      if (p.glow) {
+        ctx.shadowColor = p.color;
+        ctx.shadowBlur = p.glow * alpha;
+      }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  function updateFloaters(dtScaled) {
+    floaters = floaters.filter(f => {
+      const frame = dtScaled / 16.67;
+      f.life += dtScaled;
+      f.x += f.vx * frame + Math.sin(f.life / 90 + f.wobble) * 0.12 * frame;
+      f.y += f.vy * frame;
+      f.vy += 0.006 * frame;
+      return f.life < f.ttl;
+    });
+  }
+
+  function drawFloaters(ctx) {
+    floaters.forEach(f => {
+      const progress = clamp(f.life / f.ttl, 0, 1);
+      const alpha = Math.sin((1 - progress) * Math.PI * 0.5);
+      const pop = 1 + Math.max(0, 0.28 - progress) * 1.1;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(f.x, f.y);
+      ctx.scale(pop, pop);
+      ctx.font = `900 ${f.size}px monospace`;
+      ctx.textAlign = "center";
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = f.stroke;
+      ctx.fillStyle = f.color;
+      ctx.shadowColor = f.color;
+      ctx.shadowBlur = 10 * alpha;
+      ctx.strokeText(f.text, 0, 0);
+      ctx.fillText(f.text, 0, 0);
+      ctx.restore();
+    });
+  }
+
   function step(now) {
     const dt = now - last; last = now;
+    const speed = playbackSpeed(now);
+    const dtScaled = dt * speed;
     // advance events at ~250ms cadence
     if (now >= nextEventAt && i < events.length) {
       const ev = events[i++];
       applyEvent(ev);
-      nextEventAt = now + (ev.type === "attack" || ev.type === "death" || ev.type === "freeze" || ev.type === "revive" ? 380 : 120);
+      nextEventAt = now + eventDelay(ev, now);
     }
 
     // projectiles
     projectiles = projectiles.filter(p => {
-      p.t += dt / 600;
+      p.t += dtScaled / 600;
       if (p.t >= 1) {
         const tgt = spritesById.get(p.target);
-        if (tgt && p.hit) { tgt.flashUntil = now + 250; tgt.shake = 8; setTimeout(() => tgt.shake = 0, 220); }
+        if (tgt) {
+          if (p.hit) {
+            tgt.flashUntil = now + scaledDuration(250, now);
+            tgt.shake = 8;
+            setTimeout(() => tgt.shake = 0, scaledDuration(220, now));
+          }
+          emitHit(tgt, p, p.tx + 16, p.ty + 16);
+        }
         return false;
       }
-      p.x = p.x + (p.tx - p.x) * 0.05;
-      p.y = p.y + (p.ty - p.y) * 0.05;
+      const ratio = motionRatio(0.05, dtScaled);
+      p.x = p.x + (p.tx - p.x) * ratio;
+      p.y = p.y + (p.ty - p.y) * ratio;
       return true;
     });
 
     // smooth move sprites
-    [...leftList, ...rightList].forEach(s => { s.x += (s.targetX - s.x) * 0.12; });
+    const moveRatio = motionRatio(0.12, dtScaled);
+    [...leftList, ...rightList].forEach(s => { s.x += (s.targetX - s.x) * moveRatio; });
+    updateParticles(dtScaled);
+    updateFloaters(dtScaled);
+    screenShake = Math.max(0, screenShake - dtScaled * 0.045);
 
     // draw
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    if (screenShake > 0) ctx.translate(rand(-screenShake, screenShake), rand(-screenShake, screenShake));
     // ground line
     ctx.strokeStyle = "rgba(74,242,255,0.5)"; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(0, FLOOR_Y); ctx.lineTo(canvas.width, FLOOR_Y); ctx.stroke();
@@ -383,15 +949,19 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     grad.addColorStop(0, "rgba(255,243,108,0.8)"); grad.addColorStop(1, "transparent");
     ctx.fillStyle = grad; ctx.fillRect(0, 0, canvas.width, 160);
 
+    drawParticles(ctx, "back");
     leftList.forEach(s => drawSprite(ctx, s, now));
     rightList.forEach(s => drawSprite(ctx, s, now));
     projectiles.forEach(p => drawProjectile(ctx, p));
+    drawParticles(ctx, "front");
+    drawFloaters(ctx);
+    ctx.restore();
     if (hovered && !hovered.dead) {
       hovered.tooltipReference ||= spriteReference(canvas, hovered);
       tooltip.showTooltip?.(hovered.tooltipReference, hovered);
     }
 
-    if (done && projectiles.length === 0 && i >= events.length) {
+    if (done && projectiles.length === 0 && floaters.length === 0 && particles.length === 0 && i >= events.length) {
       onDone?.();
       return;
     }

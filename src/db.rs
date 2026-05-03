@@ -13,7 +13,16 @@ pub struct Db {
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch(r#"
+        conn.execute_batch(
+            r#"
+            PRAGMA busy_timeout = 5000;
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+        "#,
+        )?;
+        conn.execute_batch(
+            r#"
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
                 player_id TEXT NOT NULL,
@@ -38,11 +47,14 @@ impl Db {
                 wins INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
             );
-        "#)?;
+        "#,
+        )?;
         ensure_column(&conn, "runs", "player_id", "TEXT")?;
         ensure_column(&conn, "runs", "best_streak", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "runs", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
         ensure_column(&conn, "leaderboard", "player_id", "TEXT")?;
         ensure_column(&conn, "leaderboard", "updated_at", "INTEGER")?;
+        ensure_column(&conn, "leaderboard", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
         conn.execute(
             "UPDATE runs SET player_id = id WHERE player_id IS NULL OR player_id = ''",
             [],
@@ -63,6 +75,13 @@ impl Db {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_player ON leaderboard(player_id)",
             [],
         )?;
+        conn.execute(
+            "UPDATE runs SET phase = ?1 WHERE phase = ?2",
+            params![
+                serde_json::to_string(&Phase::Shop)?,
+                serde_json::to_string(&Phase::Battle)?,
+            ],
+        )?;
         let db_ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if db_ver < 2 {
             // One-time: remove ladder rows from older versions (bots are generated on demand now).
@@ -72,42 +91,62 @@ impl Db {
             )?;
             conn.pragma_update(None, "user_version", 2)?;
         }
-        Ok(Db { conn: Arc::new(Mutex::new(conn)) })
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS player_daily (
+                player_id TEXT NOT NULL,
+                day_id INTEGER NOT NULL,
+                PRIMARY KEY (player_id, day_id)
+            );",
+        )?;
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// UTC calendar day as days since Unix epoch (for grouping daily logins).
+    pub fn utc_day_id_now() -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        now / 86_400
+    }
+
+    pub fn touch_player_daily(&self, player_id: &str) -> Result<()> {
+        let day_id = Self::utc_day_id_now();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO player_daily (player_id, day_id) VALUES (?1, ?2)",
+            params![player_id, day_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_players_logged_in_today(&self) -> Result<u32> {
+        let day_id = Self::utc_day_id_now();
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM player_daily WHERE day_id = ?1",
+            [day_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
     }
 
     pub fn upsert_run(&self, run: &Run, cost: i32) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO runs(id,player_id,name,money,wins,losses,streak,best_streak,alive,phase,build_json,shop_json,cost_value,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))
-             ON CONFLICT(id) DO UPDATE SET
-               player_id=excluded.player_id, name=excluded.name, money=excluded.money,
-               wins=excluded.wins, losses=excluded.losses, streak=excluded.streak,
-               best_streak=excluded.best_streak, alive=excluded.alive, phase=excluded.phase,
-               build_json=excluded.build_json, shop_json=excluded.shop_json,
-               cost_value=excluded.cost_value, updated_at=excluded.updated_at",
-            params![
-                run.id, run.player_id, run.name,
-                run.money, run.wins, run.losses,
-                run.streak, run.best_streak,
-                if run.alive { 1 } else { 0 },
-                serde_json::to_string(&run.phase)?,
-                serde_json::to_string(&run.build)?,
-                serde_json::to_string(&run.shop)?,
-                cost,
-            ],
-        )?;
+        upsert_run_on(&conn, run, cost)?;
         Ok(())
     }
 
     pub fn load_run(&self, id: &str) -> Result<Option<Run>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT id,player_id,name,money,wins,losses,streak,best_streak,alive,phase,build_json,shop_json FROM runs WHERE id=?")?;
+        let mut stmt = conn.prepare("SELECT id,player_id,name,money,wins,losses,streak,best_streak,mmr,alive,phase,build_json,shop_json FROM runs WHERE id=?")?;
         let mut rows = stmt.query([id])?;
         if let Some(row) = rows.next()? {
-            let phase: String = row.get(9)?;
-            let build_json: String = row.get(10)?;
-            let shop_json: String = row.get(11)?;
+            let phase: String = row.get(10)?;
+            let build_json: String = row.get(11)?;
+            let shop_json: String = row.get(12)?;
             Ok(Some(Run {
                 id: row.get(0)?,
                 player_id: row.get(1)?,
@@ -117,78 +156,146 @@ impl Db {
                 losses: row.get(5)?,
                 streak: row.get(6)?,
                 best_streak: row.get(7)?,
-                alive: row.get::<_, i32>(8)? != 0,
+                mmr: row.get(8)?,
+                alive: row.get::<_, i32>(9)? != 0,
                 phase: serde_json::from_str(&phase)?,
                 build: serde_json::from_str(&build_json)?,
                 shop: serde_json::from_str(&shop_json)?,
             }))
-        } else { Ok(None) }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn load_latest_run_for_player(&self, player_id: &str) -> Result<Option<Run>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id,player_id,name,money,wins,losses,streak,best_streak,mmr,alive,phase,build_json,shop_json
+             FROM runs
+             WHERE player_id = ?1
+             ORDER BY updated_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([player_id])?;
+        if let Some(row) = rows.next()? {
+            let phase: String = row.get(10)?;
+            let build_json: String = row.get(11)?;
+            let shop_json: String = row.get(12)?;
+            Ok(Some(Run {
+                id: row.get(0)?,
+                player_id: row.get(1)?,
+                name: row.get(2)?,
+                money: row.get(3)?,
+                wins: row.get(4)?,
+                losses: row.get(5)?,
+                streak: row.get(6)?,
+                best_streak: row.get(7)?,
+                mmr: row.get(8)?,
+                alive: row.get::<_, i32>(9)? != 0,
+                phase: serde_json::from_str(&phase)?,
+                build: serde_json::from_str(&build_json)?,
+                shop: serde_json::from_str(&shop_json)?,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Find another player's build whose cost is near the requested gold budget. No bot rows exist in the DB.
-    pub fn find_opponent(&self, current_run_id: &str, target_cost: i32) -> Result<Option<(String, String, Build)>> {
+    /// Allowed opponent cost: up to 5% above `target_cost`, or up to 15% below (ceiled, at least 1 gold slack each side).
+    pub fn find_opponent(
+        &self,
+        current_run_id: &str,
+        current_player_id: &str,
+        target_cost: i32,
+    ) -> Result<Option<(String, String, Build, i32)>> {
         let conn = self.conn.lock();
-        let band = ((target_cost as f32) * 0.05).ceil().max(1.0) as i32;
-        let min_cost = (target_cost - band).max(0);
-        let max_cost = target_cost + band;
+        let down = ((target_cost as f32) * 0.15).ceil().max(1.0) as i32;
+        let up = ((target_cost as f32) * 0.05).ceil().max(1.0) as i32;
+        let min_cost = (target_cost - down).max(0);
+        let max_cost = target_cost + up;
         let mut stmt = conn.prepare(
-            "SELECT id,name,build_json FROM runs
-             WHERE id != ?1 AND cost_value BETWEEN ?2 AND ?3"
+            "SELECT id,name,build_json,mmr FROM runs
+             WHERE id != ?1
+               AND player_id != ?2
+               AND cost_value BETWEEN ?3 AND ?4",
         )?;
-        let mut rows = stmt.query(params![current_run_id, min_cost, max_cost])?;
-        let mut candidates: Vec<(String, String, Build)> = vec![];
+        let mut rows = stmt.query(params![
+            current_run_id,
+            current_player_id,
+            min_cost,
+            max_cost
+        ])?;
+        let mut candidates: Vec<(String, String, Build, i32)> = vec![];
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
             let bjson: String = row.get(2)?;
+            let mmr: i32 = row.get(3)?;
             let build: Build = serde_json::from_str(&bjson)?;
-            if !build.team.is_empty() { candidates.push((id, name, build)); }
+            if !build.team.is_empty() {
+                candidates.push((id, name, build, mmr));
+            }
         }
         let mut rng = rand::thread_rng();
         if let Some(candidate) = candidates.choose(&mut rng).cloned() {
             return Ok(Some(candidate));
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT id,name,build_json FROM runs
-             WHERE id != ?1
-             ORDER BY ABS(cost_value - ?2) ASC
-             LIMIT 10"
-        )?;
-        let mut rows = stmt.query(params![current_run_id, target_cost])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let bjson: String = row.get(2)?;
-            let build: Build = serde_json::from_str(&bjson)?;
-            if !build.team.is_empty() {
-                return Ok(Some((id, name, build)));
-            }
-        }
-
         Ok(None)
     }
 
-    pub fn record_score(&self, player_id: &str, name: &str, streak: i32, wins: i32) -> Result<()> {
+    pub fn player_mmr(&self, player_id: &str) -> Result<Option<i32>> {
         let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO leaderboard(player_id,name,streak,wins,created_at,updated_at)
-             VALUES(?,?,?,?,strftime('%s','now'),strftime('%s','now'))
-             ON CONFLICT(player_id) DO UPDATE SET
-               name=excluded.name,
-               streak=CASE
-                 WHEN excluded.wins > leaderboard.wins THEN excluded.streak
-                 WHEN excluded.wins = leaderboard.wins AND excluded.streak > leaderboard.streak THEN excluded.streak
-                 ELSE leaderboard.streak
-               END,
-               wins=MAX(leaderboard.wins, excluded.wins),
-               updated_at=strftime('%s','now')",
-            params![player_id, name, streak, wins],
-        )?;
+        let mut stmt = conn.prepare("SELECT mmr FROM leaderboard WHERE player_id = ?1")?;
+        let mut rows = stmt.query([player_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn record_score(
+        &self,
+        player_id: &str,
+        name: &str,
+        streak: i32,
+        wins: i32,
+        mmr: i32,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        record_score_on(&conn, player_id, name, streak, wins, mmr, true)?;
         Ok(())
     }
 
-    pub fn leaderboard(&self, page: usize, per_page: usize) -> Result<(Vec<(String, i32, i32)>, usize)> {
+    pub fn record_score_and_upsert_run(
+        &self,
+        run: &Run,
+        cost: i32,
+        update_mmr: bool,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        record_score_on(
+            &tx,
+            &run.player_id,
+            &run.name,
+            run.best_streak,
+            run.wins,
+            run.mmr,
+            update_mmr,
+        )?;
+        upsert_run_on(&tx, run, cost)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn leaderboard(
+        &self,
+        page: usize,
+        per_page: usize,
+    ) -> Result<(Vec<(String, String, i32, i32, i32)>, usize)> {
         let conn = self.conn.lock();
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM leaderboard", [], |r| r.get(0))?;
         let page_count = if total == 0 {
@@ -199,14 +306,44 @@ impl Db {
         let page = page.clamp(1, page_count);
         let offset = (page - 1) * per_page;
         let mut stmt = conn.prepare(
-            "SELECT name,streak,wins FROM leaderboard
-             ORDER BY wins DESC, streak DESC, updated_at ASC
+            "SELECT player_id,name,streak,wins,mmr FROM leaderboard
+             ORDER BY mmr DESC, wins DESC, streak DESC, updated_at ASC
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![per_page as i64, offset as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((
+                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+            ))
         })?;
         Ok((rows.filter_map(|r| r.ok()).collect(), page_count))
+    }
+
+    /// 1-based rank of a player on the leaderboard, if they have an entry.
+    pub fn player_rank(&self, player_id: &str) -> Result<Option<usize>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT mmr,wins,streak,updated_at FROM leaderboard WHERE player_id = ?1",
+        )?;
+        let mut rows = stmt.query([player_id])?;
+        let Some(row) = rows.next()? else { return Ok(None); };
+        let mmr: i32 = row.get(0)?;
+        let wins: i32 = row.get(1)?;
+        let streak: i32 = row.get(2)?;
+        let updated_at: i64 = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM leaderboard WHERE
+               mmr > ?1
+               OR (mmr = ?1 AND wins > ?2)
+               OR (mmr = ?1 AND wins = ?2 AND streak > ?3)
+               OR (mmr = ?1 AND wins = ?2 AND streak = ?3 AND updated_at < ?4)",
+            params![mmr, wins, streak, updated_at],
+            |r| r.get(0),
+        )?;
+        Ok(Some(count as usize + 1))
     }
 }
 
@@ -218,16 +355,87 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
             return Ok(());
         }
     }
-    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
+fn upsert_run_on(conn: &Connection, run: &Run, cost: i32) -> Result<()> {
+    conn.execute(
+        "INSERT INTO runs(id,player_id,name,money,wins,losses,streak,best_streak,mmr,alive,phase,build_json,shop_json,cost_value,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))
+         ON CONFLICT(id) DO UPDATE SET
+           player_id=excluded.player_id, name=excluded.name, money=excluded.money,
+           wins=excluded.wins, losses=excluded.losses, streak=excluded.streak,
+           best_streak=excluded.best_streak, mmr=excluded.mmr, alive=excluded.alive, phase=excluded.phase,
+           build_json=excluded.build_json, shop_json=excluded.shop_json,
+           cost_value=excluded.cost_value, updated_at=excluded.updated_at",
+        params![
+            run.id, run.player_id, run.name,
+            run.money, run.wins, run.losses,
+            run.streak, run.best_streak, run.mmr,
+            if run.alive { 1 } else { 0 },
+            serde_json::to_string(&run.phase)?,
+            serde_json::to_string(&run.build)?,
+            serde_json::to_string(&run.shop)?,
+            cost,
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_score_on(
+    conn: &Connection,
+    player_id: &str,
+    name: &str,
+    streak: i32,
+    wins: i32,
+    mmr: i32,
+    update_mmr: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO leaderboard(player_id,name,streak,wins,mmr,created_at,updated_at)
+         VALUES(?,?,?,?,?,strftime('%s','now'),strftime('%s','now'))
+         ON CONFLICT(player_id) DO UPDATE SET
+           name=excluded.name,
+           streak=CASE
+             WHEN excluded.wins > leaderboard.wins THEN excluded.streak
+             WHEN excluded.wins = leaderboard.wins AND excluded.streak > leaderboard.streak THEN excluded.streak
+             ELSE leaderboard.streak
+           END,
+           wins=MAX(leaderboard.wins, excluded.wins),
+           mmr=CASE
+             WHEN ?6 THEN excluded.mmr
+             ELSE leaderboard.mmr
+           END,
+           updated_at=strftime('%s','now')",
+        params![player_id, name, streak, wins, mmr, update_mmr],
+    )?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn test_db() -> Db {
         Db::open(":memory:").unwrap()
+    }
+
+    fn test_db_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("vaporslop-{name}-{}.sqlite", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn cleanup_db_path(path: &str) {
+        fs::remove_file(path).ok();
+        fs::remove_file(format!("{path}-wal")).ok();
+        fs::remove_file(format!("{path}-shm")).ok();
     }
 
     fn run_with_build(id: &str, name: &str, build: Build) -> Run {
@@ -240,11 +448,22 @@ mod tests {
             losses: 0,
             streak: 0,
             best_streak: 0,
+            mmr: STARTING_MMR,
             alive: true,
             build,
             shop: Shop::default(),
             phase: Phase::Shop,
         }
+    }
+
+    fn set_updated_at(db: &Db, id: &str, updated_at: i64) {
+        db.conn
+            .lock()
+            .execute(
+                "UPDATE runs SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![updated_at, id],
+            )
+            .unwrap();
     }
 
     fn one_member_build(def_id: &str) -> Build {
@@ -258,6 +477,31 @@ mod tests {
         }
     }
 
+    fn three_member_build() -> Build {
+        Build {
+            team: vec![
+                TeamMember {
+                    def_id: "orang".to_string(),
+                    hat: None,
+                    left_hand: None,
+                    right_hand: None,
+                },
+                TeamMember {
+                    def_id: "dark_vegetal".to_string(),
+                    hat: None,
+                    left_hand: None,
+                    right_hand: None,
+                },
+                TeamMember {
+                    def_id: "meme_man".to_string(),
+                    hat: None,
+                    left_hand: None,
+                    right_hand: None,
+                },
+            ],
+        }
+    }
+
     #[test]
     fn find_opponent_excludes_current_run() {
         let db = test_db();
@@ -266,31 +510,232 @@ mod tests {
         let current = run_with_build("current", "current", one_member_build("orang"));
         db.upsert_run(&current, current.build.cost_value()).unwrap();
 
-        assert!(db.find_opponent(&current.id, current.build.cost_value()).unwrap().is_none());
+        assert!(db
+            .find_opponent(&current.id, &current.player_id, current.build.cost_value())
+            .unwrap()
+            .is_none());
 
-        let opponent = run_with_build("opponent", "opponent", one_member_build("azul_picardia"));
-        db.upsert_run(&opponent, opponent.build.cost_value()).unwrap();
+        let opponent = run_with_build("opponent", "opponent", one_member_build("meme_man"));
+        db.upsert_run(&opponent, opponent.build.cost_value())
+            .unwrap();
         let far = run_with_build("far", "far", one_member_build("elephoont"));
         db.upsert_run(&far, far.build.cost_value()).unwrap();
 
-        let found = db.find_opponent(&current.id, current.build.cost_value()).unwrap().unwrap();
+        let found = db
+            .find_opponent(&current.id, &current.player_id, current.build.cost_value())
+            .unwrap()
+            .unwrap();
         assert_eq!(found.0, "opponent");
+        assert_eq!(found.3, STARTING_MMR);
+    }
+
+    #[test]
+    fn find_opponent_ignores_own_prior_runs_and_far_builds() {
+        let db = test_db();
+        db.conn.lock().execute("DELETE FROM runs", []).unwrap();
+
+        let mut current = run_with_build("current", "current", one_member_build("orang"));
+        current.player_id = "player-1".to_string();
+        db.upsert_run(&current, current.build.cost_value()).unwrap();
+
+        let mut prior = run_with_build("prior", "prior", three_member_build());
+        prior.player_id = current.player_id.clone();
+        db.upsert_run(&prior, prior.build.cost_value()).unwrap();
+
+        let far = run_with_build("far", "far", three_member_build());
+        db.upsert_run(&far, far.build.cost_value()).unwrap();
+
+        assert!(db
+            .find_opponent(&current.id, &current.player_id, current.build.cost_value())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn leaderboard_keeps_each_players_best_score() {
         let db = test_db();
-        db.conn.lock().execute("DELETE FROM leaderboard", []).unwrap();
+        db.conn
+            .lock()
+            .execute("DELETE FROM leaderboard", [])
+            .unwrap();
 
-        db.record_score("player-1", "old name", 2, 4).unwrap();
-        db.record_score("player-1", "new name", 1, 3).unwrap();
-        db.record_score("player-2", "winner", 3, 5).unwrap();
+        db.record_score("player-1", "old name", 2, 4, 1000).unwrap();
+        db.record_score("player-1", "new name", 1, 3, 1000).unwrap();
+        db.record_score("player-2", "winner", 3, 5, 1100).unwrap();
 
         let (entries, pages) = db.leaderboard(1, 1).unwrap();
         assert_eq!(pages, 2);
-        assert_eq!(entries, vec![("winner".to_string(), 3, 5)]);
+        assert_eq!(
+            entries,
+            vec![("player-2".to_string(), "winner".to_string(), 3, 5, 1100)]
+        );
 
         let (entries, _) = db.leaderboard(2, 1).unwrap();
-        assert_eq!(entries, vec![("new name".to_string(), 2, 4)]);
+        assert_eq!(
+            entries,
+            vec![("player-1".to_string(), "new name".to_string(), 2, 4, 1000)]
+        );
+    }
+
+    #[test]
+    fn leaderboard_orders_by_mmr_before_score() {
+        let db = test_db();
+        db.conn
+            .lock()
+            .execute("DELETE FROM leaderboard", [])
+            .unwrap();
+
+        db.record_score("player-1", "low mmr", 5, 10, 900).unwrap();
+        db.record_score("player-2", "high mmr", 1, 1, 1200).unwrap();
+
+        let (entries, _) = db.leaderboard(1, 10).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                ("player-2".to_string(), "high mmr".to_string(), 1, 1, 1200),
+                ("player-1".to_string(), "low mmr".to_string(), 5, 10, 900),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_round_trips_through_file_backed_db() {
+        let path = test_db_path("round-trip");
+        let mut run = run_with_build("run-1", "player", three_member_build());
+        run.player_id = "player-1".to_string();
+        run.money = 250;
+        run.wins = 2;
+        run.mmr = 1234;
+        run.shop = Shop {
+            characters: vec![Some("orang".to_string()), None],
+            items: vec![Some("sword".to_string())],
+        };
+
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_run(&run, run.build.cost_value()).unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let loaded = db.load_run("run-1").unwrap().unwrap();
+        assert_eq!(loaded.player_id, "player-1");
+        assert_eq!(loaded.money, 250);
+        assert_eq!(loaded.wins, 2);
+        assert_eq!(loaded.mmr, 1234);
+        assert_eq!(loaded.phase, Phase::Shop);
+        assert_eq!(loaded.build.team.len(), 3);
+        drop(db);
+        cleanup_db_path(&path);
+    }
+
+    #[test]
+    fn load_latest_run_for_player_returns_latest_game_over_run() {
+        let db = test_db();
+        let mut active = run_with_build("active", "player", one_member_build("meme_man"));
+        active.player_id = "player-1".to_string();
+        db.upsert_run(&active, active.build.cost_value()).unwrap();
+        set_updated_at(&db, "active", 1);
+
+        let mut game_over = run_with_build("old", "player", one_member_build("orang"));
+        game_over.player_id = "player-1".to_string();
+        game_over.alive = false;
+        game_over.phase = Phase::GameOver;
+        db.upsert_run(&game_over, game_over.build.cost_value())
+            .unwrap();
+        set_updated_at(&db, "old", 2);
+
+        let loaded = db.load_latest_run_for_player("player-1").unwrap().unwrap();
+        assert_eq!(loaded.id, "old");
+    }
+
+    #[test]
+    fn load_latest_run_for_player_returns_latest_active_run() {
+        let db = test_db();
+        let mut game_over = run_with_build("old", "player", one_member_build("orang"));
+        game_over.player_id = "player-1".to_string();
+        game_over.alive = false;
+        game_over.phase = Phase::GameOver;
+        db.upsert_run(&game_over, game_over.build.cost_value())
+            .unwrap();
+        set_updated_at(&db, "old", 1);
+
+        let mut active = run_with_build("active", "player", one_member_build("meme_man"));
+        active.player_id = "player-1".to_string();
+        db.upsert_run(&active, active.build.cost_value()).unwrap();
+        set_updated_at(&db, "active", 2);
+
+        let loaded = db.load_latest_run_for_player("player-1").unwrap().unwrap();
+        assert_eq!(loaded.id, "active");
+    }
+
+    #[test]
+    fn transactional_battle_save_records_score_and_completed_shop_phase() {
+        let db = test_db();
+        let mut run = run_with_build("winner", "winner", one_member_build("orang"));
+        run.player_id = "player-1".to_string();
+        run.wins = 1;
+        run.streak = 1;
+        run.best_streak = 1;
+        run.mmr = 1016;
+        run.money = 200;
+        run.phase = Phase::Shop;
+
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), true)
+            .unwrap();
+
+        let loaded = db.load_run("winner").unwrap().unwrap();
+        assert_eq!(loaded.phase, Phase::Shop);
+        assert_eq!(loaded.wins, 1);
+        assert_eq!(loaded.mmr, 1016);
+
+        let (entries, _) = db.leaderboard(1, 10).unwrap();
+        assert_eq!(
+            entries,
+            vec![("player-1".to_string(), "winner".to_string(), 1, 1, 1016)]
+        );
+    }
+
+    #[test]
+    fn transactional_battle_save_can_skip_leaderboard_mmr_update() {
+        let db = test_db();
+        let mut run = run_with_build("winner", "winner", one_member_build("orang"));
+        run.player_id = "player-1".to_string();
+        run.wins = 1;
+        run.best_streak = 1;
+        run.mmr = 1100;
+
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), true)
+            .unwrap();
+        run.wins = 2;
+        run.best_streak = 2;
+        run.mmr = 1300;
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), false)
+            .unwrap();
+
+        let loaded = db.load_run("winner").unwrap().unwrap();
+        assert_eq!(loaded.mmr, 1300);
+
+        let (entries, _) = db.leaderboard(1, 10).unwrap();
+        assert_eq!(
+            entries,
+            vec![("player-1".to_string(), "winner".to_string(), 2, 2, 1100)]
+        );
+    }
+
+    #[test]
+    fn legacy_battle_phase_reopens_as_shop() {
+        let path = test_db_path("legacy-battle");
+        {
+            let db = Db::open(&path).unwrap();
+            let mut run = run_with_build("legacy", "player", one_member_build("orang"));
+            run.phase = Phase::Battle;
+            db.upsert_run(&run, run.build.cost_value()).unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let loaded = db.load_run("legacy").unwrap().unwrap();
+        assert_eq!(loaded.phase, Phase::Shop);
+        drop(db);
+        cleanup_db_path(&path);
     }
 }

@@ -66,10 +66,7 @@ struct SiteStats {
 fn site_stats_snapshot(state: &AppState) -> SiteStats {
     SiteStats {
         active_players: state.presence.active_unique(),
-        logged_in_today: state
-            .db
-            .count_players_logged_in_today()
-            .unwrap_or(0),
+        logged_in_today: state.db.count_players_logged_in_today().unwrap_or(0),
     }
 }
 
@@ -749,9 +746,11 @@ async fn handle_run_action(
             run.name = name;
             Ok(None)
         }
-        ClientMsg::Leaderboard { page, per_page, around_player_id } => {
-            leaderboard_msg(state, page, per_page, around_player_id.as_deref()).map(Some)
-        }
+        ClientMsg::Leaderboard {
+            page,
+            per_page,
+            around_player_id,
+        } => leaderboard_msg(state, page, per_page, around_player_id.as_deref()).map(Some),
         _ => Err("unhandled".into()),
     }
 }

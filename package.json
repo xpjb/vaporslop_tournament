@@ -1,0 +1,26 @@
+{
+  "name": "vaporslop_tournament",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "cover": "node scripts/generate-cover.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xpjb/vaporslop_tournament.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/xpjb/vaporslop_tournament/issues"
+  },
+  "homepage": "https://github.com/xpjb/vaporslop_tournament#readme",
+  "dependencies": {
+    "@fontsource/vt323": "^5.2.7",
+    "@napi-rs/canvas": "^0.1.100"
+  }
+}

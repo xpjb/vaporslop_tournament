@@ -40,6 +40,7 @@ class Sprite {
     this.applied_front_might = c.applied_front_might ?? 0;
     this.applied_front_reflexes = c.applied_front_reflexes ?? 0;
     this.applied_front_wisdom = c.applied_front_wisdom ?? 0;
+    this.applied_enemy_reflex_debuff = c.applied_enemy_reflex_debuff ?? 0;
     this.x = 0; this.y = FLOOR_Y;
     this.targetX = 0;
     this.dead = false;
@@ -54,18 +55,20 @@ class Sprite {
 function layout(left, right, canvas) {
   const cw = canvas.width;
   const cx = cw / 2;
+  const liveLeft = left.filter(s => !s.dead);
+  const liveRight = right.filter(s => !s.dead);
   // Compute step that keeps the farthest sprite fully on-screen, capped at a max.
   const margin = 8;
   const usable = cx - CENTER_GAP / 2 - SPRITE_W - margin; // per-side usable width
-  const slots = Math.max(left.length, right.length, 1);
+  const slots = Math.max(liveLeft.length, liveRight.length, 1);
   const step = Math.min(110, slots > 1 ? usable / (slots - 1) : 110);
   // index 0 is front-most (closest to center).
-  left.forEach((s, i) => {
+  liveLeft.forEach((s, i) => {
     const x = cx - CENTER_GAP / 2 - SPRITE_W - i * step;
     s.targetX = x;
     if (s.x === 0) s.x = s.targetX;
   });
-  right.forEach((s, i) => {
+  liveRight.forEach((s, i) => {
     const x = cx + CENTER_GAP / 2 + i * step;
     s.targetX = x;
     if (s.x === 0) s.x = s.targetX;
@@ -201,9 +204,19 @@ const rand = (min, max) => min + Math.random() * (max - min);
 function createBattleAudio() {
   let ctx = null;
   let unavailable = false;
+  let disposed = false;
+  const timeoutIds = new Set();
+
+  function after(ms, fn) {
+    const id = setTimeout(() => {
+      timeoutIds.delete(id);
+      if (!disposed) fn();
+    }, ms);
+    timeoutIds.add(id);
+  }
 
   function ensure() {
-    if (unavailable) return null;
+    if (disposed || unavailable) return null;
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) {
@@ -265,7 +278,7 @@ function createBattleAudio() {
     projectile() { tone(620, 0.08, 0.025, "triangle", 980); },
     heal() {
       tone(660, 0.12, 0.04, "sine", 990);
-      setTimeout(() => tone(990, 0.12, 0.035, "sine", 1320), 55);
+      after(55, () => tone(990, 0.12, 0.035, "sine", 1320));
     },
     freeze() {
       noise(0.18, 0.055, "highpass", 2600);
@@ -277,17 +290,26 @@ function createBattleAudio() {
     },
     revive() {
       tone(330, 0.12, 0.04, "sine", 660);
-      setTimeout(() => tone(880, 0.16, 0.045, "triangle", 1320), 70);
+      after(70, () => tone(880, 0.16, 0.045, "triangle", 1320));
     },
     buff() {
       tone(520, 0.1, 0.035, "triangle", 820);
-      setTimeout(() => tone(1040, 0.12, 0.03, "sine", 1560), 45);
+      after(45, () => tone(1040, 0.12, 0.03, "sine", 1560));
     },
     summon() {
       noise(0.14, 0.04, "bandpass", 700);
       tone(420, 0.14, 0.035, "square", 760);
     },
     end() { tone(220, 0.18, 0.04, "triangle", 440); },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const tid of timeoutIds) clearTimeout(tid);
+      timeoutIds.clear();
+      const c = ctx;
+      ctx = null;
+      if (c && c.state !== "closed") c.close().catch(() => {});
+    },
   };
 }
 
@@ -333,7 +355,7 @@ function hitSprite(list, point) {
   return null;
 }
 
-const ATTACK_RESOLUTION_EVENTS = new Set(["hp", "revive", "freeze", "death", "stat_sync", "summon"]);
+const ATTACK_RESOLUTION_EVENTS = new Set(["hp", "revive", "freeze", "death", "death_blast", "stat_sync", "summon"]);
 
 function isGroupedAttack(ev, group) {
   return ev?.type === "attack" && ev.simultaneous_group != null && ev.simultaneous_group === group;
@@ -385,6 +407,9 @@ function groupSimultaneousAttacks(rawEvents) {
 
 export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip = {}) {
   if (canvas.__battleTooltipCleanup) canvas.__battleTooltipCleanup();
+  let rafId = null;
+  let cancelled = false;
+  const loopReplay = !!tooltip.loop;
   const ctx = canvas.getContext("2d");
   const events = groupSimultaneousAttacks(battleMsg.events);
   const spritesById = new Map();
@@ -393,7 +418,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   let particles = [];
   let floaters = [];
   let screenShake = 0;
-  const audio = createBattleAudio();
+  let audio = createBattleAudio();
   let log = (text) => {
     const el = document.getElementById("battleLog");
     if (!el) return;
@@ -406,7 +431,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   let last = performance.now();
   let done = false;
   let hovered = null;
-  const battleStartedAt = last;
+  let battleStartedAt = last;
 
   function playbackSpeed(now = performance.now()) {
     const elapsed = Math.max(0, now - battleStartedAt) / 1000;
@@ -419,7 +444,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   }
 
   function eventDelay(ev, now) {
-    const heavy = ev.type === "attack" || ev.type === "attack_batch" || ev.type === "death" || ev.type === "freeze" || ev.type === "revive";
+    const heavy = ev.type === "attack" || ev.type === "attack_batch" || ev.type === "death" || ev.type === "death_blast" || ev.type === "freeze" || ev.type === "revive";
     return (heavy ? 380 : 120) / playbackSpeed(now);
   }
 
@@ -588,6 +613,12 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   canvas.addEventListener("mousemove", onMouseMove);
   canvas.addEventListener("mouseleave", onMouseLeave);
   canvas.__battleTooltipCleanup = () => {
+    cancelled = true;
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    audio.dispose();
     canvas.removeEventListener("mousemove", onMouseMove);
     canvas.removeEventListener("mouseleave", onMouseLeave);
     tooltip.hideTooltip?.();
@@ -692,6 +723,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
           s.applied_front_might = ev.applied_front_might ?? 0;
           s.applied_front_reflexes = ev.applied_front_reflexes ?? 0;
           s.applied_front_wisdom = ev.applied_front_wisdom ?? 0;
+          s.applied_enemy_reflex_debuff = ev.applied_enemy_reflex_debuff ?? 0;
           if (showActivation) {
             const label = positiveStats.every(n => n === positiveStats[0]) && positiveStats.length >= 3
               ? `ALL +${positiveStats[0]}`
@@ -764,15 +796,27 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
           s.dead = true;
         }
         log(`${s?.def_id ?? "?"} falls`);
-        // re-layout remaining
-        leftList = leftList.filter(x => !x.dead);
-        rightList = rightList.filter(x => !x.dead);
         layout(leftList, rightList, canvas);
+        break;
+      }
+      case "death_blast": {
+        const source = spritesById.get(ev.source);
+        const target = spritesById.get(ev.target);
+        if (target) {
+          const now = performance.now();
+          target.flashUntil = now + scaledDuration(250, now);
+          target.shake = 9;
+          setTimeout(() => { target.shake = 0; }, scaledDuration(220, now));
+          emitStatus(target, "DEATH BLAST", "#ff5c5c");
+          emitHit(target, { hit: true, damage: ev.damage, critical: false });
+        }
+        log(`${source?.def_id ?? "death blast"} hits ${target?.def_id ?? "?"} for ${ev.damage}`);
         break;
       }
       case "revive": {
         const s = spritesById.get(ev.uid);
         if (s) {
+          s.dead = false;
           s.hp = ev.hp;
           s.revive_charges = Math.max(0, (s.revive_charges || 0) - 1);
           const now = performance.now();
@@ -791,6 +835,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
           });
           addShake(4);
           audio.revive();
+          layout(leftList, rightList, canvas);
         }
         log(`${s?.def_id ?? "?"} resurrects!`);
         break;
@@ -899,6 +944,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   }
 
   function step(now) {
+    if (cancelled) return;
     const dt = now - last; last = now;
     const speed = playbackSpeed(now);
     const dtScaled = dt * speed;
@@ -962,10 +1008,31 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     }
 
     if (done && projectiles.length === 0 && floaters.length === 0 && particles.length === 0 && i >= events.length) {
-      onDone?.();
-      return;
+      if (loopReplay) {
+        i = 0;
+        const nowReset = performance.now();
+        nextEventAt = nowReset;
+        last = nowReset;
+        done = false;
+        battleStartedAt = nowReset;
+        spritesById.clear();
+        leftList = [];
+        rightList = [];
+        projectiles = [];
+        particles = [];
+        floaters = [];
+        screenShake = 0;
+        hovered = null;
+        tooltip.hideTooltip?.();
+        audio.dispose();
+        audio = createBattleAudio();
+      } else {
+        onDone?.();
+        rafId = null;
+        return;
+      }
     }
-    requestAnimationFrame(step);
+    if (!cancelled) rafId = requestAnimationFrame(step);
   }
-  requestAnimationFrame(step);
+  rafId = requestAnimationFrame(step);
 }

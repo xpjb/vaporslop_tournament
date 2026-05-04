@@ -29,6 +29,14 @@ pub enum Property {
     SummonOnAllyDeath {
         species: String,
     },
+    /// When this unit dies, damage the opposing front unit by `might_multiplier * might`.
+    DamageEnemyOnDeath {
+        might_multiplier: i32,
+    },
+    /// When this unit dies, living allies gain `amount` to all stats.
+    TeamStatsOnDeath {
+        amount: i32,
+    },
     /// Living wearer gains this much might each time an ally on the same side dies.
     MightOnAllyDeath {
         might: i32,
@@ -79,6 +87,14 @@ pub enum Property {
         reflexes: i32,
         wisdom: i32,
         hp: i32,
+    },
+    /// While alive, each living enemy loses this much reflexes (hit-chance defense; stacks across allies).
+    DebuffEnemyReflexes {
+        amount: i32,
+    },
+    /// On each landed hit, foe loses `amount` from might, reflexes, wisdom, and max HP (and current HP capped); totals stack across gear.
+    DrainEnemyStatsOnHit {
+        amount: i32,
     },
 }
 

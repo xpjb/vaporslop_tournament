@@ -46,12 +46,6 @@ body:has(#shop:not(.hidden)) .hud {
   padding: 0.35rem 0.75rem;
   flex-shrink: 0;
 }
-body:has(#shop:not(.hidden)) .lb-dock-panel {
-  max-height: min(200px, 26vh);
-}
-body:has(#shop:not(.hidden)) .lb-header {
-  padding: 0.45rem 0.75rem 0.3rem;
-}
 @media (max-width: 720px) {
   body:has(#shop:not(.hidden)) header {
     padding: 0.35rem 0.85rem;
@@ -96,6 +90,38 @@ header {
   flex: 1 1 220px;
   min-width: 0;
 }
+.title-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.title-stack h1 {
+  margin: 0;
+}
+.lb-pill {
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
+  padding: 0.25rem 0.85rem;
+  background: linear-gradient(90deg, rgba(255,92,242,0.25), rgba(74,242,255,0.18));
+  border: 1px solid var(--neon-cyan);
+  color: var(--neon-yellow);
+  text-shadow: 0 0 6px var(--neon-yellow);
+  box-shadow:
+    0 0 12px rgba(255, 92, 242, 0.45),
+    inset 0 0 10px rgba(74, 242, 255, 0.25);
+  transition: transform .12s, box-shadow .12s;
+  cursor: pointer;
+  font: inherit;
+  text-transform: lowercase;
+}
+.lb-pill:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 0 18px rgba(255, 92, 242, 0.7),
+    inset 0 0 12px rgba(255, 243, 108, 0.35);
+}
 header h1 {
   font-size: 2rem; letter-spacing: 0.2em; margin: 0;
   text-shadow: 0 0 10px var(--neon-pink), 0 0 24px var(--neon-purple);
@@ -120,23 +146,30 @@ header h1 {
 .header-right {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 0.5rem;
-  flex: 0 1 320px;
-  min-width: min(100%, 260px);
-  max-width: 380px;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 #navControls {
   display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: .5rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
   margin-left: 0;
   flex: 0 0 auto;
+}
+.nav-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
-.lb-dock {
-  min-width: 0;
+#navControls .lb-pill {
+  align-self: stretch;
+  text-align: center;
 }
 .connection-pill {
   min-width: 6.8rem;
@@ -189,7 +222,7 @@ header h1 {
   accent-color: var(--neon-cyan);
 }
 #status {
-  flex: 1 1 100%;
+  flex: 0 0 auto;
   min-width: min(100%, 12rem);
   margin-left: 0;
   text-align: right;
@@ -197,9 +230,11 @@ header h1 {
   line-height: 1.3;
   letter-spacing: 0.06em;
   text-transform: lowercase;
-  min-height: 1.3em;
   word-break: break-word;
   transition: color 0.15s ease, text-shadow 0.15s ease;
+}
+#status:empty {
+  display: none;
 }
 #status.status--error {
   color: var(--neon-pink);
@@ -218,8 +253,8 @@ header h1 {
     align-items: stretch;
   }
   .header-right {
-    flex: 1 1 auto;
-    max-width: none;
+    width: 100%;
+    align-items: stretch;
   }
   header h1 {
     font-size: clamp(1.05rem, 5vw, 1.5rem);
@@ -230,6 +265,9 @@ header h1 {
     text-align: left;
   }
   #navControls {
+    align-items: stretch;
+  }
+  .nav-controls-row {
     justify-content: center;
   }
   #status {
@@ -462,13 +500,74 @@ input {
 .item-socket.drag-over { outline: 2px solid var(--neon-yellow); outline-offset: -2px; }
 @keyframes pulse { 0%,100% { box-shadow: 0 0 4px var(--neon-yellow); } 50% { box-shadow: 0 0 20px var(--neon-yellow); } }
 
-#battleCanvas {
+#battleCanvas, #goReplayCanvas {
   display: block; width: 100%;
   border: 2px solid var(--neon-pink);
   background: linear-gradient(180deg, #16003e 0%, #4a0058 60%, #ff5cf2 100%);
   image-rendering: pixelated;
   margin: 1rem 0;
   box-shadow: 0 0 30px var(--neon-pink);
+}
+#goReplayCanvas {
+  border-color: var(--neon-cyan);
+  box-shadow: 0 0 24px var(--neon-cyan);
+}
+.go-title {
+  font-size: 4.5rem;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-align: center;
+  margin: 0.4rem 0 0.2rem;
+  line-height: 1;
+}
+.go-title-defeat {
+  color: var(--neon-pink);
+  text-shadow: 0 0 18px var(--neon-pink), 0 0 32px var(--neon-pink);
+}
+.go-title-victory {
+  background-image: linear-gradient(90deg, #fff36c, #ff5cf2, #4af2ff, #66ff99, #fff36c);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ultimateShimmer 2.4s linear infinite, ultimatePulse 1.4s ease-in-out infinite;
+  filter: drop-shadow(0 0 18px #fff36c) drop-shadow(0 0 32px #ff5cf2);
+}
+.go-title-victory::after {
+  content: "✦ ✦ ✦";
+  display: block;
+  font-size: 1.2rem;
+  letter-spacing: 0.6em;
+  background: none;
+  -webkit-text-fill-color: #fff36c;
+  color: #fff36c;
+  margin-top: 0.4rem;
+  animation: ultimateSparkle 1.1s ease-in-out infinite alternate;
+}
+@keyframes ultimateShimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 300% 50%; }
+}
+@keyframes ultimatePulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+@keyframes ultimateSparkle {
+  0% { opacity: 0.4; transform: translateY(2px); }
+  100% { opacity: 1; transform: translateY(-2px); }
+}
+.go-subtitle {
+  text-align: center;
+  font-size: 1.1rem;
+  color: var(--neon-cyan);
+  margin: 0.2rem 0;
+}
+.go-record {
+  text-align: center;
+  font-size: 1.05rem;
+  color: var(--neon-yellow);
+  letter-spacing: 0.08em;
+  margin: 0.1rem 0 0.6rem;
 }
 .vs { display: flex; gap: 1rem; justify-content: center; align-items: center; font-size: 1.4rem; color: var(--neon-yellow); }
 #battleLog { max-height: 120px; overflow-y: auto; padding: .4rem; border: 1px solid var(--neon-cyan); background: rgba(0,0,0,0.4); font-size: 0.95rem; }
@@ -478,6 +577,29 @@ input {
 
 /* —— Shop screen: denser layout so team + inventory + controls fit one view —— */
 #shop.screen {
+  --shop-team-slot-min: 74px;
+  --shop-team-slot-height: 148px;
+  --shop-team-pad-y: 0.3rem;
+  --shop-team-pad-x: 0.35rem;
+  --shop-team-portrait: 68px;
+  --shop-team-name-font: 0.82rem;
+  --shop-team-stat-font: 0.72rem;
+  --shop-team-equip-bottom: 52px;
+  --shop-team-equip-size: 26px;
+  --shop-socket-height: 28px;
+  --shop-socket-font: 0.58rem;
+  --shop-socket-img: 22px;
+  --shop-row-gap: 0.45rem;
+  --shop-card-width: 108px;
+  --shop-card-height: 118px;
+  --shop-card-pad: 0.3rem;
+  --shop-card-img: 64px;
+  --shop-card-name-font: 0.82rem;
+  --shop-card-stat-font: 0.72rem;
+  --shop-card-cost-font: 0.78rem;
+  --shop-item-card-width: 76px;
+  --shop-item-card-height: 96px;
+  --shop-item-card-img: 44px;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -498,39 +620,40 @@ input {
   flex-shrink: 0;
 }
 #shop.screen #teamRow .team-slot {
-  min-height: 148px;
-  padding: 0.3rem 0.35rem;
+  min-width: var(--shop-team-slot-min);
+  min-height: var(--shop-team-slot-height);
+  padding: var(--shop-team-pad-y) var(--shop-team-pad-x);
 }
 #shop.screen #teamRow .team-slot img.portrait {
-  width: 68px;
-  height: 68px;
+  width: var(--shop-team-portrait);
+  height: var(--shop-team-portrait);
 }
 #shop.screen .team-slot .name {
-  font-size: 0.82rem;
+  font-size: var(--shop-team-name-font);
   margin-top: 0.1rem;
 }
 #shop.screen .team-slot .stats,
 #shop.screen .team-slot .cost {
-  font-size: 0.72rem;
+  font-size: var(--shop-team-stat-font);
   line-height: 1.15;
 }
 #shop.screen .team-slot .left-hand,
 #shop.screen .team-slot .right-hand {
-  bottom: 52px;
-  width: 26px;
-  height: 26px;
+  bottom: var(--shop-team-equip-bottom);
+  width: var(--shop-team-equip-size);
+  height: var(--shop-team-equip-size);
 }
 #shop.screen .item-sockets {
   margin-top: 0.15rem;
   gap: 0.12rem;
 }
 #shop.screen .item-socket {
-  min-height: 28px;
-  font-size: 0.58rem;
+  min-height: var(--shop-socket-height);
+  font-size: var(--shop-socket-font);
 }
 #shop.screen .item-socket img {
-  width: 22px;
-  height: 22px;
+  width: var(--shop-socket-img);
+  height: var(--shop-socket-img);
 }
 #shop.screen .team-slot .front-tag {
   font-size: 0.62rem;
@@ -564,37 +687,37 @@ input {
   margin: 0.1rem 0 0.2rem;
   font-size: 0.85rem;
 }
-#shop #shopChars .row,
-#shop #shopItems .row {
-  gap: 0.45rem;
+#shop #shopChars,
+#shop #shopItems {
+  gap: var(--shop-row-gap);
 }
 #shop #shopInventory .card {
-  width: 108px;
-  min-height: 118px;
-  padding: 0.3rem;
+  width: var(--shop-card-width);
+  min-height: var(--shop-card-height);
+  padding: var(--shop-card-pad);
 }
 #shop #shopInventory .card img {
-  width: 64px;
-  height: 64px;
+  width: var(--shop-card-img);
+  height: var(--shop-card-img);
 }
 #shop #shopInventory .card .name {
-  font-size: 0.82rem;
+  font-size: var(--shop-card-name-font);
   min-height: 1.2em;
 }
 #shop #shopInventory .card .stats {
-  font-size: 0.72rem;
+  font-size: var(--shop-card-stat-font);
   margin-top: 0.1rem;
 }
 #shop #shopInventory .card .cost {
-  font-size: 0.78rem;
+  font-size: var(--shop-card-cost-font);
 }
 #shop #shopInventory .item-card {
-  width: 76px;
-  min-height: 96px;
+  width: var(--shop-item-card-width);
+  min-height: var(--shop-item-card-height);
 }
 #shop #shopInventory .item-card img {
-  width: 44px;
-  height: 44px;
+  width: var(--shop-item-card-img);
+  height: var(--shop-item-card-img);
 }
 
 #shop.screen .controls {
@@ -652,10 +775,10 @@ input {
 .modal-actions {
   justify-content: flex-end;
 }
-/* —— Leaderboard (header dock) —— */
-.lb-dock-panel {
-  width: 100%;
-  max-height: min(260px, 36vh);
+/* —— Leaderboard modal —— */
+.modal-panel.lb-panel {
+  width: min(640px, 100%);
+  max-height: min(82vh, 720px);
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -664,13 +787,13 @@ input {
     radial-gradient(ellipse at top, rgba(255,92,242,0.18), transparent 65%),
     linear-gradient(180deg, rgba(20, 0, 50, 0.97), rgba(8, 0, 28, 0.98));
   box-shadow:
-    0 0 28px rgba(255, 92, 242, 0.4),
-    0 0 48px rgba(74, 242, 255, 0.2),
-    inset 0 0 24px rgba(255, 92, 242, 0.1);
+    0 0 36px rgba(255, 92, 242, 0.5),
+    0 0 60px rgba(74, 242, 255, 0.25),
+    inset 0 0 28px rgba(255, 92, 242, 0.12);
   position: relative;
   overflow: hidden;
 }
-.lb-dock-panel::before {
+.modal-panel.lb-panel::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -693,12 +816,21 @@ input {
 }
 .lb-header h2 {
   margin: 0;
-  font-size: 1.1rem;
-  letter-spacing: 0.22em;
+  font-size: 1.45rem;
+  letter-spacing: 0.32em;
   color: var(--neon-pink);
   text-shadow:
     0 0 10px var(--neon-pink),
     0 0 24px rgba(164, 92, 255, 0.6);
+}
+.lb-close {
+  background: transparent;
+  border: 1px solid var(--neon-pink);
+  color: var(--neon-pink);
+  padding: 0.15rem 0.55rem;
+  font-size: 1rem;
+  letter-spacing: 0;
+  box-shadow: 0 0 8px rgba(255, 92, 242, 0.45);
 }
 .lb-toolbar {
   display: flex;
@@ -870,13 +1002,15 @@ input {
 .tooltip {
   position: absolute;
   z-index: 1000;
-  width: min(340px, calc(100vw - 24px));
-  max-height: min(520px, calc(100vh - 24px));
+  width: min(310px, calc(100vw - 24px));
+  max-height: min(460px, calc(100vh - 24px));
   overflow-y: auto;
-  padding: .75rem;
+  padding: .6rem;
   border: 1px solid var(--neon-cyan);
   background: rgba(8, 0, 28, .96);
   color: #fff;
+  font-size: .88rem;
+  line-height: 1.22;
   box-shadow:
     0 0 18px rgba(74,242,255,.35),
     inset 0 0 18px rgba(255,92,242,.16);
@@ -885,7 +1019,7 @@ input {
 }
 .tooltip-title {
   color: var(--neon-yellow);
-  font-size: 1.3rem;
+  font-size: 1.12rem;
   line-height: 1;
   text-shadow: 0 0 8px var(--neon-yellow);
 }
@@ -898,11 +1032,11 @@ input {
 .tooltip-hero {
   display: flex;
   justify-content: center;
-  margin: .4rem 0;
+  margin: .32rem 0;
 }
 .tooltip-hero img {
-  width: 72px;
-  height: 72px;
+  width: 60px;
+  height: 60px;
   object-fit: contain;
   image-rendering: pixelated;
   filter: drop-shadow(0 0 6px rgba(74,242,255,.5));
@@ -911,34 +1045,53 @@ input {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .25rem;
-  margin: .5rem 0;
+  margin: .38rem 0;
 }
 .tooltip-stats div {
   border: 1px solid rgba(74,242,255,.28);
   background: rgba(74,242,255,.06);
-  padding: .25rem .35rem;
+  padding: .2rem .32rem;
 }
-.tooltip-stats span {
+.tooltip-stats .tooltip-stat-label {
   display: block;
   color: rgba(255,255,255,.72);
   font-size: .78rem;
   text-transform: lowercase;
 }
+.tooltip-stats .tooltip-stat-value {
+  display: block;
+}
+.tooltip-stats .tooltip-stat-breakdown,
+.tooltip-stats .tooltip-stat-breakdown .tooltip-base,
+.tooltip-stats .tooltip-stat-breakdown .tooltip-delta,
+.tooltip-stats .tooltip-stat-breakdown .tooltip-stat-op {
+  display: inline;
+}
+.tooltip-stats .tooltip-stat-breakdown {
+  color: rgba(255,255,255,.5);
+  font-size: .7rem;
+  font-weight: normal;
+}
+.tooltip-stats .tooltip-stat-op {
+  color: rgba(255,255,255,.5);
+  font-weight: normal;
+}
 .tooltip-stats b {
   color: #fff;
-  font-size: 1.05rem;
+  font-size: .95rem;
 }
-.tooltip-stats .tooltip-delta {
-  display: inline;
-  margin-left: .3rem;
-  color: var(--neon-yellow);
+.tooltip-stats .tooltip-delta--pos {
+  color: #7dff9e;
+}
+.tooltip-stats .tooltip-delta--neg {
+  color: #ff7d94;
 }
 .tooltip-stats .tooltip-base {
   color: rgba(255,255,255,.48);
   font-size: .7rem;
 }
 .tooltip-section {
-  margin-top: .55rem;
+  margin-top: .42rem;
   color: var(--neon-pink);
   letter-spacing: .08em;
   text-transform: lowercase;
@@ -1035,10 +1188,10 @@ input {
 }
 .tooltip-equipped {
   display: grid;
-  grid-template-columns: 46px 1fr;
-  gap: .45rem;
-  margin-top: .35rem;
-  padding-top: .35rem;
+  grid-template-columns: 38px 1fr;
+  gap: .35rem;
+  margin-top: .28rem;
+  padding-top: .28rem;
   border-top: 1px solid rgba(255,92,242,.22);
 }
 .tooltip-equipped b {
@@ -1054,8 +1207,8 @@ input {
   text-transform: lowercase;
 }
 .tooltip-item-icon img {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   object-fit: contain;
   image-rendering: pixelated;
   filter: drop-shadow(0 0 5px var(--neon-yellow));
@@ -1276,6 +1429,32 @@ input {
 }
 
 @media (max-width: 900px) and (orientation: landscape) {
+  #shop.screen {
+    --shop-team-slot-min: 68px;
+    --shop-team-slot-height: 118px;
+    --shop-team-pad-y: 0.22rem;
+    --shop-team-pad-x: 0.22rem;
+    --shop-team-portrait: 50px;
+    --shop-team-name-font: 0.72rem;
+    --shop-team-stat-font: 0.62rem;
+    --shop-team-equip-bottom: 44px;
+    --shop-team-equip-size: 22px;
+    --shop-socket-height: 22px;
+    --shop-socket-font: 0.5rem;
+    --shop-socket-img: 18px;
+    --shop-row-gap: 0.35rem;
+    --shop-card-width: 88px;
+    --shop-card-height: 94px;
+    --shop-card-pad: 0.22rem;
+    --shop-card-img: 48px;
+    --shop-card-name-font: 0.72rem;
+    --shop-card-stat-font: 0.64rem;
+    --shop-card-cost-font: 0.64rem;
+    --shop-item-card-width: 64px;
+    --shop-item-card-height: 78px;
+    --shop-item-card-img: 36px;
+  }
+
   body:has(#shop:not(.hidden)) header {
     padding: 0.25rem 0.8rem;
   }
@@ -1311,33 +1490,40 @@ input {
   }
 
   #shop.screen #teamRow .team-slot {
-    min-width: 68px;
-    min-height: 118px;
-    padding: 0.22rem;
+    min-width: var(--shop-team-slot-min);
+    min-height: var(--shop-team-slot-height);
+    padding: var(--shop-team-pad-y) var(--shop-team-pad-x);
   }
 
   #shop.screen #teamRow .team-slot img.portrait {
-    width: 50px;
-    height: 50px;
+    width: var(--shop-team-portrait);
+    height: var(--shop-team-portrait);
   }
 
   #shop.screen .team-slot .name {
-    font-size: 0.72rem;
+    font-size: var(--shop-team-name-font);
   }
 
   #shop.screen .team-slot .stats,
   #shop.screen .team-slot .cost {
-    font-size: 0.62rem;
+    font-size: var(--shop-team-stat-font);
+  }
+
+  #shop.screen .team-slot .left-hand,
+  #shop.screen .team-slot .right-hand {
+    bottom: var(--shop-team-equip-bottom);
+    width: var(--shop-team-equip-size);
+    height: var(--shop-team-equip-size);
   }
 
   #shop.screen .item-socket {
-    min-height: 22px;
-    font-size: 0.5rem;
+    min-height: var(--shop-socket-height);
+    font-size: var(--shop-socket-font);
   }
 
   #shop.screen .item-socket img {
-    width: 18px;
-    height: 18px;
+    width: var(--shop-socket-img);
+    height: var(--shop-socket-img);
   }
 
   #shop #shopInventory {
@@ -1347,7 +1533,7 @@ input {
 
   #shop #shopChars,
   #shop #shopItems {
-    gap: 0.35rem;
+    gap: var(--shop-row-gap);
   }
 
   #shop #shopInventory .inventory-section h4 {
@@ -1355,33 +1541,33 @@ input {
   }
 
   #shop #shopInventory .card {
-    width: 88px;
-    min-height: 94px;
-    padding: 0.22rem;
+    width: var(--shop-card-width);
+    min-height: var(--shop-card-height);
+    padding: var(--shop-card-pad);
   }
 
   #shop #shopInventory .card img {
-    width: 48px;
-    height: 48px;
+    width: var(--shop-card-img);
+    height: var(--shop-card-img);
   }
 
   #shop #shopInventory .card .name {
-    font-size: 0.72rem;
+    font-size: var(--shop-card-name-font);
   }
 
   #shop #shopInventory .card .stats,
   #shop #shopInventory .card .cost {
-    font-size: 0.64rem;
+    font-size: var(--shop-card-stat-font);
   }
 
   #shop #shopInventory .item-card {
-    width: 64px;
-    min-height: 78px;
+    width: var(--shop-item-card-width);
+    min-height: var(--shop-item-card-height);
   }
 
   #shop #shopInventory .item-card img {
-    width: 36px;
-    height: 36px;
+    width: var(--shop-item-card-img);
+    height: var(--shop-item-card-img);
   }
 
   #shop.screen .controls {
@@ -1422,5 +1608,118 @@ input {
 
   #battleLog {
     max-height: 20vh;
+  }
+}
+
+@media (max-height: 640px) and (orientation: landscape) {
+  body:has(#shop:not(.hidden)) {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+    max-height: none;
+    overflow-y: auto;
+  }
+
+  body:has(#shop:not(.hidden)) main {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+
+  body:has(#shop:not(.hidden)) header {
+    padding-top: 0.2rem;
+    padding-bottom: 0.2rem;
+  }
+
+  body:has(#shop:not(.hidden)) header h1 {
+    font-size: clamp(0.9rem, 3vw, 1.2rem);
+  }
+
+  body:has(#shop:not(.hidden)) .site-stats {
+    font-size: 0.82rem;
+    margin-top: 0.15rem;
+  }
+
+  body:has(#shop:not(.hidden)) .hud {
+    gap: 0.25rem 0.55rem;
+    margin-bottom: 0.2rem;
+    padding: 0.22rem 0.48rem;
+    font-size: 0.82rem;
+  }
+
+  body:has(#shop:not(.hidden)) .player-controls input {
+    width: 7rem;
+    flex-basis: 7rem;
+    font-size: 0.82rem;
+    padding: 0.18rem 0.45rem;
+  }
+
+  body:has(#shop:not(.hidden)) .player-controls button {
+    min-height: 28px;
+    padding: 0.14rem 0.45rem;
+    font-size: 0.75rem;
+  }
+
+  #shop.screen {
+    --shop-team-slot-min: 58px;
+    --shop-team-slot-height: 98px;
+    --shop-team-pad-y: 0.18rem;
+    --shop-team-pad-x: 0.18rem;
+    --shop-team-portrait: 40px;
+    --shop-team-name-font: 0.62rem;
+    --shop-team-stat-font: 0.54rem;
+    --shop-team-equip-bottom: 35px;
+    --shop-team-equip-size: 18px;
+    --shop-socket-height: 18px;
+    --shop-socket-font: 0.44rem;
+    --shop-socket-img: 15px;
+    --shop-row-gap: 0.28rem;
+    --shop-card-width: 74px;
+    --shop-card-height: 76px;
+    --shop-card-pad: 0.18rem;
+    --shop-card-img: 36px;
+    --shop-card-name-font: 0.62rem;
+    --shop-card-stat-font: 0.54rem;
+    --shop-card-cost-font: 0.56rem;
+    --shop-item-card-width: 54px;
+    --shop-item-card-height: 64px;
+    --shop-item-card-img: 28px;
+    gap: 0.08rem;
+  }
+
+  #shop.screen > h3,
+  #shop #shopInventory > h3 {
+    font-size: 0.78rem;
+  }
+
+  #shop.screen #teamDirections {
+    margin-bottom: 0.05rem;
+    font-size: 0.58rem;
+  }
+
+  #shop #shopInventory {
+    flex: 0 0 auto;
+    overflow: visible;
+    margin: 0.12rem 0 0.08rem;
+    padding: 0.24rem 0.3rem;
+  }
+
+  #shop #shopInventory .inventory-section + .inventory-section {
+    margin-top: 0.18rem;
+  }
+
+  #shop #shopInventory .inventory-section h4 {
+    margin: 0.04rem 0 0.08rem;
+    font-size: 0.62rem;
+  }
+
+  #shop.screen .controls {
+    margin-top: 0.12rem;
+  }
+
+  #shop.screen .controls button,
+  .quit-run-button {
+    min-height: 28px;
+    padding: 0.16rem 0.5rem;
+    font-size: 0.72rem;
   }
 }

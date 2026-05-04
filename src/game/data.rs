@@ -120,6 +120,30 @@ fn build_character_defs() -> Vec<CharacterDef> {
             }],
         },
         CharacterDef {
+            id: "redchilli".into(),
+            name: "Red Chilli".into(),
+            sprite: "redchilli.webp".into(),
+            cost: 70,
+            might: 10,
+            reflexes: 10,
+            wisdom: 5,
+            hp: 20,
+            properties: vec![DamageEnemyOnDeath {
+                might_multiplier: 2,
+            }],
+        },
+        CharacterDef {
+            id: "greenchilli".into(),
+            name: "Green Chilli".into(),
+            sprite: "greenchilli.webp".into(),
+            cost: 70,
+            might: 10,
+            reflexes: 10,
+            wisdom: 5,
+            hp: 20,
+            properties: vec![TeamStatsOnDeath { amount: 3 }],
+        },
+        CharacterDef {
             id: "orang".into(),
             name: "Orang".into(),
             sprite: "orang.webp".into(),
@@ -340,6 +364,22 @@ fn build_item_defs() -> Vec<ItemDef> {
             cost: 70,
             slot: GearSlot::Hand,
             properties: vec![Property::Armour { value: 3 }],
+        },
+        ItemDef {
+            id: "winterstaff".into(),
+            name: "Winter Staff".into(),
+            sprite: "winterstaff.png".into(),
+            cost: 130,
+            slot: GearSlot::Hand,
+            properties: vec![Property::DebuffEnemyReflexes { amount: 3 }],
+        },
+        ItemDef {
+            id: "fishstick".into(),
+            name: "Fish Stick".into(),
+            sprite: "fishstick.png".into(),
+            cost: 130,
+            slot: GearSlot::Hand,
+            properties: vec![Property::DrainEnemyStatsOnHit { amount: 1 }],
         },
     ]
 }

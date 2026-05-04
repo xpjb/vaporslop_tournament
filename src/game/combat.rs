@@ -32,6 +32,8 @@ pub struct Combatant {
     applied_front_wisdom: i32,
     #[serde(default)]
     pub formation_hp_bonus: i32,
+    #[serde(default)]
+    pub applied_enemy_reflex_debuff: i32,
     /// From gear (`ReviveOnce`); decremented when a revival triggers.
     #[serde(default)]
     pub revive_charges: u8,
@@ -91,6 +93,11 @@ pub enum CombatEvent {
         uid: u32,
         side: u8,
     },
+    DeathBlast {
+        source: u32,
+        target: u32,
+        damage: i32,
+    },
     Revive {
         uid: u32,
         hp: i32,
@@ -115,6 +122,8 @@ pub enum CombatEvent {
         applied_front_reflexes: i32,
         #[serde(default)]
         applied_front_wisdom: i32,
+        #[serde(default)]
+        applied_enemy_reflex_debuff: i32,
     },
     Hp {
         uid: u32,
@@ -216,6 +225,7 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
                 applied_front_reflexes: 0,
                 applied_front_wisdom: 0,
                 formation_hp_bonus: 0,
+                applied_enemy_reflex_debuff: 0,
                 revive_charges,
                 mana,
                 max_mana,
@@ -317,6 +327,7 @@ fn refresh_formation_front_aura(team: &mut [Combatant], mut events: Option<&mut 
                     applied_front_might: c.applied_front_might,
                     applied_front_reflexes: c.applied_front_reflexes,
                     applied_front_wisdom: c.applied_front_wisdom,
+                    applied_enemy_reflex_debuff: c.applied_enemy_reflex_debuff,
                 });
             }
         }
@@ -347,9 +358,61 @@ fn damage_after_armour(raw: i32, defender: &Combatant) -> i32 {
     (raw - red).max(0)
 }
 
-/// Hit chance vs the defender's frontliner. Same formula for melee and ranged.
+/// Sum of [`Property::DebuffEnemyReflexes`] from living units on the attacking side (applied to defenders' reflexes for hit rolls).
+fn debuff_enemy_reflex_total(attackers: &[Combatant]) -> i32 {
+    attackers
+        .iter()
+        .filter(|c| c.hp > 0)
+        .flat_map(|c| c.properties.iter())
+        .filter_map(|p| {
+            if let Property::DebuffEnemyReflexes { amount } = p {
+                Some(*amount)
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+fn refresh_enemy_reflex_debuffs(
+    left: &mut [Combatant],
+    right: &mut [Combatant],
+    mut events: Option<&mut Vec<CombatEvent>>,
+) {
+    let left_debuff = debuff_enemy_reflex_total(left);
+    let right_debuff = debuff_enemy_reflex_total(right);
+
+    for c in left.iter_mut() {
+        if c.hp <= 0 {
+            continue;
+        }
+        if c.applied_enemy_reflex_debuff != right_debuff {
+            c.applied_enemy_reflex_debuff = right_debuff;
+            if let Some(ev) = events.as_mut() {
+                push_stat_sync(c, ev);
+            }
+        }
+    }
+    for c in right.iter_mut() {
+        if c.hp <= 0 {
+            continue;
+        }
+        if c.applied_enemy_reflex_debuff != left_debuff {
+            c.applied_enemy_reflex_debuff = left_debuff;
+            if let Some(ev) = events.as_mut() {
+                push_stat_sync(c, ev);
+            }
+        }
+    }
+}
+
+/// Hit chance vs the defender. Same formula for melee and ranged.
 fn hit_chance(att: &Combatant, def: &Combatant) -> f32 {
-    let diff = (att.reflexes - def.reflexes) as f32;
+    let def_r = def
+        .reflexes
+        .saturating_sub(def.applied_enemy_reflex_debuff)
+        .max(0);
+    let diff = (att.reflexes - def_r) as f32;
     (0.7 + diff * 0.03).clamp(0.1, 0.95)
 }
 
@@ -503,6 +566,7 @@ fn summon_on_enemy_death(
                                 applied_front_reflexes: 0,
                                 applied_front_wisdom: 0,
                                 formation_hp_bonus: 0,
+                                applied_enemy_reflex_debuff: 0,
                                 revive_charges: 0,
                                 mana,
                                 max_mana,
@@ -572,6 +636,7 @@ fn summon_on_ally_death(
                                 applied_front_reflexes: 0,
                                 applied_front_wisdom: 0,
                                 formation_hp_bonus: 0,
+                                applied_enemy_reflex_debuff: 0,
                                 revive_charges: 0,
                                 mana,
                                 max_mana,
@@ -597,26 +662,150 @@ fn summon_on_ally_death(
     }
 }
 
-fn handle_foe_killed(
-    foes: &mut Vec<Combatant>,
-    actors: &mut Vec<Combatant>,
-    foe_idx: usize,
+fn push_stat_sync(c: &Combatant, events: &mut Vec<CombatEvent>) {
+    events.push(CombatEvent::StatSync {
+        uid: c.uid,
+        might: c.might,
+        reflexes: c.reflexes,
+        wisdom: c.wisdom,
+        max_hp: c.max_hp,
+        hp: c.hp,
+        formation_hp_bonus: c.formation_hp_bonus,
+        applied_front_might: c.applied_front_might,
+        applied_front_reflexes: c.applied_front_reflexes,
+        applied_front_wisdom: c.applied_front_wisdom,
+        applied_enemy_reflex_debuff: c.applied_enemy_reflex_debuff,
+    });
+}
+
+/// Subtract HP damage.
+fn apply_damage_to_target(target: &mut Combatant, damage: i32) {
+    if damage <= 0 {
+        return;
+    }
+    target.hp -= damage;
+}
+
+#[inline]
+fn drain_enemy_stats_on_hit_amount(props: &[Property]) -> i32 {
+    props
+        .iter()
+        .filter_map(|p| {
+            if let Property::DrainEnemyStatsOnHit { amount } = p {
+                Some(*amount)
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+/// Peel `amount` from might/reflexes/wisdom, reduce max HP (min 1), clamp HP to effective max.
+fn apply_flat_stat_damage_to_target(
+    target: &mut Combatant,
+    amount: i32,
+    events: &mut Vec<CombatEvent>,
+) {
+    if amount <= 0 {
+        return;
+    }
+    target.might = (target.might - amount).max(0);
+    target.reflexes = (target.reflexes - amount).max(0);
+    target.wisdom = (target.wisdom - amount).max(0);
+    target.max_hp = (target.max_hp - amount).max(1);
+    let cap = effective_max_hp(target);
+    target.hp = (target.hp - amount).max(0).min(cap);
+    push_stat_sync(target, events);
+}
+
+fn handle_unit_dropped(
+    victims: &mut Vec<Combatant>,
+    enemies: &mut Vec<Combatant>,
+    victim_idx: usize,
     killer_uid: u32,
-    attacker_side: u8,
+    killer_side: u8,
     events: &mut Vec<CombatEvent>,
     uid_counter: &mut u32,
 ) {
-    let dead_uid = foes[foe_idx].uid;
-    let dead_def = foes[foe_idx].def_id.clone();
-    let dead_side = foes[foe_idx].side;
+    let dead_uid = victims[victim_idx].uid;
+    let dead_def = victims[victim_idx].def_id.clone();
+    let dead_side = victims[victim_idx].side;
+    let dead_might = victims[victim_idx].might;
+    let dead_props = victims[victim_idx].properties.clone();
     events.push(CombatEvent::Death {
         uid: dead_uid,
         side: dead_side,
     });
-    apply_ally_death_bonuses(foes, events);
-    apply_kill_bonuses(actors, killer_uid, events);
-    summon_on_enemy_death(actors, &dead_def, attacker_side, events, uid_counter);
-    summon_on_ally_death(foes, &dead_def, dead_side, events, uid_counter);
+    apply_ally_death_bonuses(victims, events);
+    apply_team_stats_on_death(victims, &dead_props, events);
+    apply_kill_bonuses(enemies, killer_uid, events);
+    apply_damage_enemy_on_death(
+        enemies,
+        victims,
+        dead_uid,
+        dead_might,
+        &dead_props,
+        dead_side,
+        events,
+        uid_counter,
+    );
+    summon_on_enemy_death(enemies, &dead_def, killer_side, events, uid_counter);
+    summon_on_ally_death(victims, &dead_def, dead_side, events, uid_counter);
+}
+
+fn resolve_dropped_unit(
+    victims: &mut Vec<Combatant>,
+    enemies: &mut Vec<Combatant>,
+    victim_idx: usize,
+    killer_uid: u32,
+    killer_side: u8,
+    events: &mut Vec<CombatEvent>,
+    uid_counter: &mut u32,
+) -> bool {
+    if victim_idx >= victims.len() {
+        return false;
+    }
+
+    let victim_uid = victims[victim_idx].uid;
+    if victims[victim_idx].hp > 0 {
+        events.push(CombatEvent::Hp {
+            uid: victim_uid,
+            hp: victims[victim_idx].hp,
+        });
+        return false;
+    }
+
+    let will_revive = victims[victim_idx].revive_charges > 0;
+    events.push(CombatEvent::Hp {
+        uid: victim_uid,
+        hp: 0,
+    });
+    handle_unit_dropped(
+        victims,
+        enemies,
+        victim_idx,
+        killer_uid,
+        killer_side,
+        events,
+        uid_counter,
+    );
+
+    if will_revive {
+        if let Some(idx) = victims.iter().position(|c| c.uid == victim_uid) {
+            victims[idx].revive_charges = victims[idx].revive_charges.saturating_sub(1);
+            victims[idx].hp = effective_max_hp(&victims[idx]);
+            events.push(CombatEvent::Revive {
+                uid: victim_uid,
+                hp: victims[idx].hp,
+            });
+            events.push(CombatEvent::Hp {
+                uid: victim_uid,
+                hp: victims[idx].hp,
+            });
+        }
+    }
+
+    true
 }
 
 fn apply_kill_bonuses(actors: &mut [Combatant], killer_uid: u32, events: &mut Vec<CombatEvent>) {
@@ -655,18 +844,7 @@ fn apply_kill_bonuses(actors: &mut [Combatant], killer_uid: u32, events: &mut Ve
         let cap = effective_max_hp(c);
         c.hp = (c.hp + dhp).clamp(0, cap);
     }
-    events.push(CombatEvent::StatSync {
-        uid: c.uid,
-        might: c.might,
-        reflexes: c.reflexes,
-        wisdom: c.wisdom,
-        max_hp: c.max_hp,
-        hp: c.hp,
-        formation_hp_bonus: c.formation_hp_bonus,
-        applied_front_might: c.applied_front_might,
-        applied_front_reflexes: c.applied_front_reflexes,
-        applied_front_wisdom: c.applied_front_wisdom,
-    });
+    push_stat_sync(c, events);
 }
 
 /// Apply item effects that trigger when an ally dies (`foes` is that ally's team).
@@ -707,19 +885,87 @@ fn apply_ally_death_bonuses(foes: &mut [Combatant], events: &mut Vec<CombatEvent
             let cap = effective_max_hp(c);
             c.hp = (c.hp + dhp).clamp(0, cap);
         }
-        events.push(CombatEvent::StatSync {
-            uid: c.uid,
-            might: c.might,
-            reflexes: c.reflexes,
-            wisdom: c.wisdom,
-            max_hp: c.max_hp,
-            hp: c.hp,
-            formation_hp_bonus: c.formation_hp_bonus,
-            applied_front_might: c.applied_front_might,
-            applied_front_reflexes: c.applied_front_reflexes,
-            applied_front_wisdom: c.applied_front_wisdom,
-        });
+        push_stat_sync(c, events);
     }
+}
+
+fn apply_team_stats_on_death(
+    team: &mut [Combatant],
+    dead_props: &[Property],
+    events: &mut Vec<CombatEvent>,
+) {
+    let bonus: i32 = dead_props
+        .iter()
+        .filter_map(|p| {
+            if let Property::TeamStatsOnDeath { amount } = p {
+                Some(*amount)
+            } else {
+                None
+            }
+        })
+        .sum();
+    if bonus == 0 {
+        return;
+    }
+
+    for c in team.iter_mut() {
+        if c.hp <= 0 {
+            continue;
+        }
+        c.might += bonus;
+        c.reflexes += bonus;
+        c.wisdom += bonus;
+        c.max_hp += bonus;
+        let cap = effective_max_hp(c);
+        c.hp = (c.hp + bonus).clamp(0, cap);
+        push_stat_sync(c, events);
+    }
+}
+
+fn apply_damage_enemy_on_death(
+    enemies: &mut Vec<Combatant>,
+    allies: &mut Vec<Combatant>,
+    source_uid: u32,
+    source_might: i32,
+    source_props: &[Property],
+    source_side: u8,
+    events: &mut Vec<CombatEvent>,
+    uid_counter: &mut u32,
+) {
+    let multiplier: i32 = source_props
+        .iter()
+        .filter_map(|p| {
+            if let Property::DamageEnemyOnDeath { might_multiplier } = p {
+                Some(*might_multiplier)
+            } else {
+                None
+            }
+        })
+        .sum();
+    let damage = source_might * multiplier;
+    if damage <= 0 {
+        return;
+    }
+
+    let Some(target_idx) = first_alive_idx(enemies) else {
+        return;
+    };
+    let target_uid = enemies[target_idx].uid;
+    events.push(CombatEvent::DeathBlast {
+        source: source_uid,
+        target: target_uid,
+        damage,
+    });
+    enemies[target_idx].hp -= damage;
+    resolve_dropped_unit(
+        enemies,
+        allies,
+        target_idx,
+        source_uid,
+        source_side,
+        events,
+        uid_counter,
+    );
 }
 
 pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
@@ -729,6 +975,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
     let mut right = build_team(right_build, 1, &mut uid_counter);
     refresh_formation_front_aura(&mut left, None);
     refresh_formation_front_aura(&mut right, None);
+    refresh_enemy_reflex_debuffs(&mut left, &mut right, None);
     let mut events = vec![CombatEvent::Start {
         left: left.clone(),
         right: right.clone(),
@@ -868,33 +1115,44 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                         1
                     };
 
-                    let foe_indices: Vec<usize> = foes
+                    let foe_uids: Vec<u32> = foes
                         .iter()
-                        .enumerate()
-                        .filter(|(_, c)| c.hp > 0)
+                        .filter(|c| c.hp > 0)
                         .take(cleave_count)
-                        .map(|(idx, _)| idx)
+                        .map(|c| c.uid)
                         .collect();
-                    let simultaneous_group = if foe_indices.len() > 1 {
+                    let simultaneous_group = if foe_uids.len() > 1 {
                         let group = simultaneous_group_counter;
                         simultaneous_group_counter += 1;
                         Some(group)
                     } else {
                         None
                     };
+                    let attacker_snapshot = actors[i].clone();
+                    let on_hit_stat_drain =
+                        drain_enemy_stats_on_hit_amount(&attacker_snapshot.properties);
 
-                    for &foe_idx in &foe_indices {
-                        let chance = hit_chance(&actors[i], &foes[foe_idx]);
+                    for &target_uid in &foe_uids {
+                        let Some(foe_idx) =
+                            foes.iter().position(|c| c.uid == target_uid && c.hp > 0)
+                        else {
+                            continue;
+                        };
+                        let chance = hit_chance(&attacker_snapshot, &foes[foe_idx]);
                         let hit = rng.gen::<f32>() < chance;
                         let (damage, critical) = if hit {
-                            let raw = roll_crit_damage(damage_stat, &actors[i].properties, &mut rng);
+                            let raw = roll_crit_damage(
+                                damage_stat,
+                                &attacker_snapshot.properties,
+                                &mut rng,
+                            );
                             (damage_after_armour(raw.0, &foes[foe_idx]), raw.1)
                         } else {
                             (0, false)
                         };
                         events.push(CombatEvent::Attack {
-                            attacker: actors[i].uid,
-                            target: foes[foe_idx].uid,
+                            attacker: attacker_snapshot.uid,
+                            target: target_uid,
                             ranged,
                             projectile: projectile.clone(),
                             damage,
@@ -903,54 +1161,44 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                             simultaneous_group,
                         });
                         if hit {
-                            foes[foe_idx].hp -= damage;
-                            let mut revived = false;
-                            if foes[foe_idx].hp <= 0 && foes[foe_idx].revive_charges > 0 {
-                                foes[foe_idx].revive_charges -= 1;
-                                foes[foe_idx].hp = effective_max_hp(&foes[foe_idx]);
-                                events.push(CombatEvent::Revive {
-                                    uid: foes[foe_idx].uid,
-                                    hp: foes[foe_idx].hp,
-                                });
-                                events.push(CombatEvent::Hp {
-                                    uid: foes[foe_idx].uid,
-                                    hp: foes[foe_idx].hp,
-                                });
-                                revived = true;
-                            } else {
-                                events.push(CombatEvent::Hp {
-                                    uid: foes[foe_idx].uid,
-                                    hp: foes[foe_idx].hp.max(0),
-                                });
-                            }
-
-                            if let Some(spr) = actors[i].properties.iter().find_map(|p| {
+                            let freeze_sprite = attacker_snapshot.properties.iter().find_map(|p| {
                                 if let Property::FreezeOnHit { sprite } = p {
                                     Some(sprite.clone())
                                 } else {
                                     None
                                 }
-                            }) {
-                                if foes[foe_idx].hp > 0 {
-                                    foes[foe_idx].frozen_turns = 1;
-                                    events.push(CombatEvent::Freeze {
-                                        target: foes[foe_idx].uid,
-                                        sprite: spr,
-                                    });
-                                }
-                            }
-
-                            if !revived && foes[foe_idx].hp <= 0 {
-                                handle_foe_killed(
-                                    foes,
-                                    actors,
-                                    foe_idx,
-                                    actors[i].uid,
-                                    side,
+                            });
+                            apply_damage_to_target(&mut foes[foe_idx], damage);
+                            if on_hit_stat_drain > 0 && foes[foe_idx].hp > 0 {
+                                apply_flat_stat_damage_to_target(
+                                    &mut foes[foe_idx],
+                                    on_hit_stat_drain,
                                     &mut events,
-                                    &mut uid_counter,
                                 );
-                                needs_aura = true;
+                            }
+                            let dropped = resolve_dropped_unit(
+                                foes,
+                                actors,
+                                foe_idx,
+                                attacker_snapshot.uid,
+                                side,
+                                &mut events,
+                                &mut uid_counter,
+                            );
+                            needs_aura |= dropped;
+
+                            if let Some(spr) = freeze_sprite {
+                                if let Some(target_idx) =
+                                    foes.iter().position(|c| c.uid == target_uid)
+                                {
+                                    if foes[target_idx].hp > 0 {
+                                        foes[target_idx].frozen_turns = 1;
+                                        events.push(CombatEvent::Freeze {
+                                            target: target_uid,
+                                            sprite: spr,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -958,6 +1206,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                 if needs_aura {
                     refresh_formation_front_aura(&mut left, Some(&mut events));
                     refresh_formation_front_aura(&mut right, Some(&mut events));
+                    refresh_enemy_reflex_debuffs(&mut left, &mut right, Some(&mut events));
                 }
             }
         }
@@ -997,4 +1246,204 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
     }
     events.push(CombatEvent::End { winner });
     BattleResult { events, winner }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_combatant(
+        uid: u32,
+        def_id: &str,
+        side: u8,
+        hp: i32,
+        wisdom: i32,
+        properties: Vec<Property>,
+    ) -> Combatant {
+        Combatant {
+            uid,
+            def_id: def_id.into(),
+            sprite: "test.webp".into(),
+            hat_id: None,
+            left_hand_id: None,
+            right_hand_id: None,
+            hat_sprite: None,
+            left_hand_sprite: None,
+            right_hand_sprite: None,
+            max_hp: 20,
+            hp,
+            might: 1,
+            reflexes: 1,
+            wisdom,
+            properties,
+            frozen_turns: 0,
+            side,
+            applied_front_might: 0,
+            applied_front_reflexes: 0,
+            applied_front_wisdom: 0,
+            formation_hp_bonus: 0,
+            applied_enemy_reflex_debuff: 0,
+            revive_charges: 0,
+            mana: 0,
+            max_mana: 0,
+        }
+    }
+
+    #[test]
+    fn revived_units_still_trigger_vegetal_death_procs() {
+        let mut victims = vec![
+            test_combatant(1, "meme_man", 1, 0, 1, vec![]),
+            test_combatant(
+                2,
+                "dark_vegetal",
+                1,
+                20,
+                1,
+                vec![Property::SummonOnAllyDeath {
+                    species: "dark_vegetal".into(),
+                }],
+            ),
+        ];
+        victims[0].revive_charges = 1;
+        let mut enemies = vec![test_combatant(
+            3,
+            "vegetal",
+            0,
+            20,
+            1,
+            vec![Property::SummonOnEnemyDeath {
+                species: "vegetal".into(),
+            }],
+        )];
+        let mut events = vec![];
+        let mut uid_counter = 10;
+
+        resolve_dropped_unit(
+            &mut victims,
+            &mut enemies,
+            0,
+            3,
+            0,
+            &mut events,
+            &mut uid_counter,
+        );
+
+        assert_eq!(victims[0].hp, effective_max_hp(&victims[0]));
+        assert!(events
+            .iter()
+            .any(|ev| matches!(ev, CombatEvent::Revive { uid: 1, .. })));
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            CombatEvent::Summon { combatant, .. } if combatant.def_id == "vegetal"
+        )));
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            CombatEvent::Summon { combatant, .. } if combatant.def_id == "dark_vegetal"
+        )));
+    }
+
+    #[test]
+    fn revived_chillis_still_trigger_death_blast() {
+        let mut victims = vec![test_combatant(
+            1,
+            "redchilli",
+            1,
+            0,
+            5,
+            vec![Property::DamageEnemyOnDeath {
+                might_multiplier: 2,
+            }],
+        )];
+        victims[0].might = 10;
+        victims[0].revive_charges = 1;
+        let mut enemies = vec![test_combatant(2, "meme_man", 0, 60, 1, vec![])];
+        let mut events = vec![];
+        let mut uid_counter = 10;
+
+        resolve_dropped_unit(
+            &mut victims,
+            &mut enemies,
+            0,
+            2,
+            0,
+            &mut events,
+            &mut uid_counter,
+        );
+
+        assert_eq!(victims[0].hp, effective_max_hp(&victims[0]));
+        assert_eq!(enemies[0].hp, 40);
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            CombatEvent::DeathBlast {
+                source: 1,
+                target: 2,
+                damage: 20
+            }
+        )));
+    }
+
+    #[test]
+    fn green_chilli_grants_flat_stats_on_death() {
+        let mut victims = vec![
+            test_combatant(
+                1,
+                "greenchilli",
+                1,
+                0,
+                5,
+                vec![Property::TeamStatsOnDeath { amount: 3 }],
+            ),
+            test_combatant(2, "meme_man", 1, 20, 1, vec![]),
+        ];
+        let mut enemies = vec![test_combatant(3, "meme_man", 0, 20, 1, vec![])];
+        let mut events = vec![];
+        let mut uid_counter = 10;
+
+        resolve_dropped_unit(
+            &mut victims,
+            &mut enemies,
+            0,
+            3,
+            0,
+            &mut events,
+            &mut uid_counter,
+        );
+
+        assert_eq!(victims[1].might, 4);
+        assert_eq!(victims[1].reflexes, 4);
+        assert_eq!(victims[1].wisdom, 4);
+        assert_eq!(victims[1].max_hp, 23);
+    }
+
+    #[test]
+    fn drain_enemy_stats_on_hit_peels_fixed_amount() {
+        let mut c = test_combatant(1, "meme_man", 0, 20, 10, vec![]);
+        c.might = 10;
+        c.reflexes = 10;
+        c.wisdom = 10;
+        c.max_hp = 20;
+        c.hp = 20;
+        let mut events = vec![];
+        apply_flat_stat_damage_to_target(&mut c, 1, &mut events);
+        assert_eq!(c.might, 9);
+        assert_eq!(c.reflexes, 9);
+        assert_eq!(c.wisdom, 9);
+        assert_eq!(c.max_hp, 19);
+        assert_eq!(c.hp, 19);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::StatSync { uid: 1, .. })));
+    }
+
+    #[test]
+    fn debuff_enemy_reflex_improves_hit_odds_for_attackers() {
+        let mut att = test_combatant(1, "meme_man", 0, 20, 10, vec![]);
+        att.reflexes = 10;
+        let mut def = test_combatant(2, "meme_man", 1, 20, 10, vec![]);
+        def.reflexes = 10;
+        let base = hit_chance(&att, &def);
+        def.applied_enemy_reflex_debuff = 3;
+        let chilled = hit_chance(&att, &def);
+        assert!(chilled > base);
+    }
 }

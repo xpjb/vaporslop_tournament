@@ -91,6 +91,17 @@ impl Db {
             )?;
             conn.pragma_update(None, "user_version", 2)?;
         }
+        if db_ver < 3 {
+            conn.execute(
+                r#"UPDATE runs SET build_json = REPLACE(build_json, '"frostscepter"', '"winterstaff"')"#,
+                [],
+            )?;
+            conn.execute(
+                r#"UPDATE runs SET shop_json = REPLACE(shop_json, '"frostscepter"', '"winterstaff"')"#,
+                [],
+            )?;
+            conn.pragma_update(None, "user_version", 3)?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS player_daily (
                 player_id TEXT NOT NULL,
@@ -325,11 +336,12 @@ impl Db {
     /// 1-based rank of a player on the leaderboard, if they have an entry.
     pub fn player_rank(&self, player_id: &str) -> Result<Option<usize>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT mmr,wins,streak,updated_at FROM leaderboard WHERE player_id = ?1",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT mmr,wins,streak,updated_at FROM leaderboard WHERE player_id = ?1")?;
         let mut rows = stmt.query([player_id])?;
-        let Some(row) = rows.next()? else { return Ok(None); };
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
         let mmr: i32 = row.get(0)?;
         let wins: i32 = row.get(1)?;
         let streak: i32 = row.get(2)?;

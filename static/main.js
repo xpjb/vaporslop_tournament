@@ -39,6 +39,7 @@ const state = {
     playerRank: null,
     loading: false,
     pendingScroll: null, // "top" | "rank:<n>" | null
+    open: false,
   },
 };
 
@@ -143,7 +144,13 @@ function setNickname(name, notifyServer = true) {
   if (notifyServer && state.run) send({ type: "rename_player", name: next });
 }
 
+function stopGameOverReplay() {
+  $("#goReplayCanvas").__battleTooltipCleanup?.();
+  state.gameOverReplayKey = null;
+}
+
 function show(screenId) {
+  if (screenId !== "gameover") stopGameOverReplay();
   $$(".screen").forEach((s) => s.classList.add("hidden"));
   $(`#${screenId}`).classList.remove("hidden");
   syncRunHudVisibility();
@@ -207,6 +214,8 @@ function startNewRun() {
   setNickname($("#nameInput").value || state.nickname, false);
   state.lastBattle = null;
   state.battleAnimating = false;
+  stopGameOverReplay();
+  $("#battleCanvas").__battleTooltipCleanup?.();
   return send({ type: "new_run", player_id: state.playerId, name: state.nickname });
 }
 
@@ -229,12 +238,10 @@ function handleServer(msg) {
       state.defs.items = msg.items;
       state.consts = msg.constants;
       $("#hudMaxLosses").textContent = msg.constants.max_losses;
-      $("#hudMaxWins").textContent = msg.constants.max_wins;
       $("#goMaxWins").textContent = msg.constants.max_wins;
       $("#rerollCost").textContent = msg.constants.reroll_cost;
       if (msg.site_stats) syncSiteStats(msg.site_stats);
       resumeRun(true);
-      loadLeaderboard();
       break;
     case "state":
       state.autoResumePending = false;
@@ -351,12 +358,12 @@ const STAT_KEYS = [
   { key: "wisdom", label: "wisdom" },
   { key: "hp", label: "hp" },
 ];
-const SLOT_LABELS = { hat: "hat", left_hand: "left hand", right_hand: "right hand" };
-
 let tooltipEl = null;
 let cleanupTooltip = null;
 let activeTooltipReference = null;
 let activeTooltipHtml = "";
+let tooltipHideTimer = null;
+const tooltipHosts = new Set();
 
 function ensureTooltip() {
   if (tooltipEl) return tooltipEl;
@@ -380,6 +387,10 @@ function updateTooltipPosition(reference) {
 
 function showTooltip(reference, html) {
   if (!html) return;
+  if (tooltipHideTimer) {
+    clearTimeout(tooltipHideTimer);
+    tooltipHideTimer = null;
+  }
   const el = ensureTooltip();
   if (activeTooltipReference !== reference) {
     if (cleanupTooltip) cleanupTooltip();
@@ -395,6 +406,30 @@ function showTooltip(reference, html) {
 }
 
 function hideTooltip() {
+  if (tooltipHideTimer) clearTimeout(tooltipHideTimer);
+  tooltipHideTimer = setTimeout(() => {
+    tooltipHosts.forEach((host) => {
+      if (!host.isConnected) tooltipHosts.delete(host);
+    });
+    const hovered = [...tooltipHosts]
+      .filter((host) => host.matches(":hover"))
+      .sort((a, b) => (a.contains(b) ? -1 : b.contains(a) ? 1 : 0));
+    const activeHost = hovered[hovered.length - 1];
+
+    if (activeHost) {
+      activeHost._showTooltip?.();
+      return;
+    }
+
+    hideTooltipNow();
+  }, 30);
+}
+
+function hideTooltipNow() {
+  if (tooltipHideTimer) {
+    clearTimeout(tooltipHideTimer);
+    tooltipHideTimer = null;
+  }
   if (cleanupTooltip) cleanupTooltip();
   cleanupTooltip = null;
   activeTooltipReference = null;
@@ -404,6 +439,8 @@ function hideTooltip() {
 
 function attachTooltip(el, content) {
   const show = () => showTooltip(el, typeof content === "function" ? content() : content);
+  el._showTooltip = show;
+  tooltipHosts.add(el);
   el.addEventListener("pointerenter", show);
   el.addEventListener("focus", show);
   el.addEventListener("pointerleave", hideTooltip);
@@ -491,6 +528,8 @@ function propertyText(p) {
     case "freeze_on_hit": return "freezes on hit";
     case "summon_on_enemy_death": return `summon ${escape(p.species)} when an enemy dies`;
     case "summon_on_ally_death": return `summon ${escape(p.species)} when an ally dies`;
+    case "damage_enemy_on_death": return `on death: deal ${escape(String(p.might_multiplier))}x might to enemy front`;
+    case "team_stats_on_death": return `on death: team gets all stats ${signed(p.amount)}`;
     case "might_on_ally_death": return (
       `when an ally dies: might ${signed(p.might)} for this battle`
     );
@@ -525,6 +564,14 @@ function propertyText(p) {
       const s = escape(String(v));
       return `armour ${s}, reduces damage taken by ${s}`;
     }
+    case "debuff_enemy_reflexes": {
+      const n = escape(String(p.amount ?? 0));
+      return `enemies get −${n} quickness while this is held`;
+    }
+    case "drain_enemy_stats_on_hit": {
+      const n = Number(p.amount) || 0;
+      return `+${escape(String(n))} damage to all stats`;
+    }
     default: return escape(p.kind || "property");
   }
 }
@@ -548,9 +595,14 @@ function statGrid(base, total = base, currentHp = null) {
     ${STAT_KEYS.map(({ key, label }) => {
       const delta = total[key] - base[key];
       const value = key === "hp" && currentHp !== null ? `${currentHp}/${total[key]}` : total[key];
-      const mod = delta ? `<span class="tooltip-delta">${signed(delta)}</span>` : "";
-      const baseText = delta ? `<span class="tooltip-base">base ${base[key]}</span>` : "";
-      return `<div><span>${label}</span><b>${value}</b>${mod}${baseText}</div>`;
+      let breakdown = "";
+      if (delta !== 0) {
+        const cls = delta > 0 ? "tooltip-delta--pos" : "tooltip-delta--neg";
+        const abs = Math.abs(delta);
+        const op = delta > 0 ? " + " : " − ";
+        breakdown = ` <span class="tooltip-stat-breakdown">(<span class="tooltip-base">${base[key]}</span><span class="tooltip-stat-op">${op}</span><span class="tooltip-delta ${cls}">${abs}</span>)</span>`;
+      }
+      return `<div><span class="tooltip-stat-label">${label}</span><span class="tooltip-stat-value"><b>${value}</b>${breakdown}</span></div>`;
     }).join("")}
   </div>`;
 }
@@ -584,7 +636,7 @@ function memberTooltip(member) {
   const stats = effectiveStats(member);
   const items = memberItems(member);
   const itemRows = items.length
-    ? items.map(({ key, item }) => `<div class="tooltip-equipped">${itemIcon(item, SLOT_LABELS[key])}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>`).join("")
+    ? items.map(({ item }) => `<div class="tooltip-equipped">${itemIcon(item)}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>`).join("")
     : `<div class="tooltip-empty">no equipped items</div>`;
   return `<div class="tooltip-title">${escape(cd.name)}</div>
     <div class="tooltip-meta">$${cd.cost} · equipped value $${items.reduce((sum, { item }) => sum + item.cost, cd.cost)}</div>
@@ -613,6 +665,14 @@ function formationFrontAuraTooltipSection(c) {
     <div class="tooltip-hint">From living allies that buff your front slot.</div>`;
 }
 
+function enemyAuraTooltipSection(c) {
+  const reflexDebuff = c.applied_enemy_reflex_debuff || 0;
+  if (!reflexDebuff) return "";
+  return `<div class="tooltip-section">active debuffs</div>
+    <div class="tooltip-aura-line">reflexes ${signed(-reflexDebuff)}</div>
+    <div class="tooltip-hint">From opposing living units with debuff auras.</div>`;
+}
+
 function combatantTooltip(c) {
   const cd = charDef(c.def_id);
   const effMaxHp = (c.max_hp || 0) + (c.formation_hp_bonus || 0);
@@ -624,7 +684,7 @@ function combatantTooltip(c) {
   };
   const total = {
     might: c.might || 0,
-    reflexes: c.reflexes || 0,
+    reflexes: Math.max(0, (c.reflexes || 0) - (c.applied_enemy_reflex_debuff || 0)),
     wisdom: c.wisdom || 0,
     hp: effMaxHp,
   };
@@ -636,7 +696,7 @@ function combatantTooltip(c) {
   const itemRows = itemIds.length
     ? itemIds.map(([slot, id]) => {
       const item = itemDef(id);
-      return item ? `<div class="tooltip-equipped">${itemIcon(item, slot)}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>` : "";
+      return item ? `<div class="tooltip-equipped">${itemIcon(item)}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>` : "";
     }).join("")
     : `<div class="tooltip-empty">no equipped items</div>`;
   return `<div class="tooltip-title">${escape(cd?.name || c.def_id)}</div>
@@ -645,6 +705,7 @@ function combatantTooltip(c) {
     ${statGrid(base, total, Math.max(0, c.hp || 0))}
     ${armourTotalSectionHtml(c.properties || [])}
     ${formationFrontAuraTooltipSection(c)}
+    ${enemyAuraTooltipSection(c)}
   ${c.revive_charges ? `<div class="tooltip-section">resurrection</div><div>${escape(String(c.revive_charges))} charge${c.revive_charges === 1 ? "" : "s"} remaining</div>` : ""}
   ${(c.max_mana || 0) > 0 ? `<div class="tooltip-section">mana</div><div>${escape(String(Math.max(0, c.mana ?? 0)))} / ${escape(String(c.max_mana))}</div>` : ""}
     <div class="tooltip-section">unit properties</div>
@@ -703,7 +764,7 @@ function flash(text, opts = {}) {
   }, duration);
 }
 
-function loadLeaderboard({ around = false } = {}) {
+function loadLeaderboardPayload({ around = false } = {}) {
   state.lb.entries = [];
   state.lb.minPage = null;
   state.lb.maxPage = null;
@@ -720,7 +781,21 @@ function loadLeaderboard({ around = false } = {}) {
   }
 }
 
+function openLeaderboard({ around = false } = {}) {
+  $("#lbModal").classList.remove("hidden");
+  state.lb.open = true;
+  loadLeaderboardPayload({ around });
+  $("#lbCloseBtn")?.focus();
+}
+
+function closeLeaderboard() {
+  $("#lbModal").classList.add("hidden");
+  state.lb.open = false;
+  state.lb.pendingScroll = null;
+}
+
 function loadLbPage(page, position) {
+  if (!state.lb.open) return;
   if (state.lb.loading) return;
   if (page < 1 || page > state.lb.pageCount) return;
   if (state.lb.minPage !== null && page >= state.lb.minPage && page <= state.lb.maxPage) return;
@@ -734,6 +809,10 @@ function handleLeaderboardMsg(msg) {
   state.lb.pageCount = msg.page_count || 1;
   state.lb.perPage = msg.per_page || LB_PAGE_SIZE;
   if (msg.player_rank != null) state.lb.playerRank = msg.player_rank;
+
+  if (!state.lb.open) {
+    return;
+  }
 
   const startRank = (msg.page - 1) * state.lb.perPage + 1;
   const incoming = msg.entries.map((e, i) => ({ ...e, rank: startRank + i }));
@@ -804,6 +883,58 @@ function renderLeaderboardList() {
   $("#lbMeBtn").disabled = state.lb.playerRank == null;
 }
 
+function populateGameOver(r, battleMsg) {
+  const wins = r.wins ?? 0;
+  const losses = r.losses ?? 0;
+  const maxWins = state.consts.max_wins ?? 30;
+  const ultimate = wins >= maxWins;
+
+  const titleEl = $("#goTitle");
+  const subEl = $("#goSubtitle");
+  const recordEl = $("#goRecord");
+  titleEl.classList.remove("go-title-defeat", "go-title-victory");
+  if (ultimate) {
+    titleEl.textContent = "ULTIMATE VICTORY";
+    titleEl.classList.add("go-title-victory");
+    subEl.textContent = `${wins} wins — you've topped the tournament`;
+  } else {
+    titleEl.textContent = "GG";
+    titleEl.classList.add("go-title-defeat");
+    if (battleMsg) {
+      const opName = battleMsg.opponent_name || "an opponent";
+      const mmrText = battleMsg.opponent_mmr_before != null
+        ? ` (${Math.round(battleMsg.opponent_mmr_before)})`
+        : "";
+      subEl.textContent = `Defeated by ${opName}${mmrText}`;
+    } else {
+      subEl.textContent = "";
+    }
+  }
+  recordEl.textContent = `record: ${wins}–${losses}`;
+  $("#goWins").textContent = wins;
+
+  const wrap = $("#goReplayWrap");
+  if (battleMsg && battleMsg.events && battleMsg.events.length) {
+    wrap.classList.remove("hidden");
+    $("#goLeftName").textContent = formatPlayerName(r.name ?? "you", battleMsg.player_mmr_before);
+    $("#goRightName").textContent = formatPlayerName(battleMsg.opponent_name, battleMsg.opponent_mmr_before, {
+      unknownMmr: battleMsg.opponent_mmr_before == null,
+    });
+    const key = `${r.id}:${battleMsg.events.length}`;
+    if (state.gameOverReplayKey !== key) {
+      state.gameOverReplayKey = key;
+      playBattle($("#goReplayCanvas"), battleMsg, charDef, itemDef, () => {}, {
+        showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
+        hideTooltip,
+        loop: true,
+      });
+    }
+  } else {
+    wrap.classList.add("hidden");
+    state.gameOverReplayKey = null;
+  }
+}
+
 function renderRun() {
   const r = state.run;
   if (!r) return;
@@ -814,7 +945,7 @@ function renderRun() {
       syncRunHudVisibility();
       return;
     }
-    $("#goWins").textContent = r.wins;
+    populateGameOver(r, state.lastBattle);
     show("gameover");
     return;
   }
@@ -931,7 +1062,7 @@ function renderItemSockets(teamIdx, member) {
       if (item) attachTooltip(socket, () => itemTooltip(item));
       socket.addEventListener("dragstart", (e) => {
         e.stopPropagation();
-        hideTooltip();
+        hideTooltipNow();
         setDrag(e, { type: "team_item", team: teamIdx, slot: key, itemSlot: item?.slot ?? key });
         socket.classList.add("dragging");
       });
@@ -1113,7 +1244,7 @@ function renderShop() {
     attachTooltip(c, () => characterTooltip(cd));
     c.draggable = !cantAfford;
     c.addEventListener("dragstart", (e) => {
-      hideTooltip();
+      hideTooltipNow();
       setDrag(e, { type: "shop_character", slot: i });
       c.classList.add("dragging");
     });
@@ -1149,7 +1280,7 @@ function renderShop() {
       <div class="stats">${it.slot}</div>
     `;
     c.addEventListener("dragstart", (e) => {
-      hideTooltip();
+      hideTooltipNow();
       setDrag(e, { type: "shop_item", slot: i, itemSlot: itemSocketId(it.slot) });
       c.classList.add("dragging");
     });
@@ -1239,8 +1370,13 @@ $("#hudNameInput").addEventListener("keydown", (e) => {
 $("#newRunBtn").onclick = () => {
   startNewRun();
 };
-$("#lbTopBtn").onclick = () => loadLeaderboard({ around: false });
-$("#lbMeBtn").onclick = () => loadLeaderboard({ around: true });
+$("#openLbBtn").onclick = () => openLeaderboard();
+$("#lbCloseBtn").onclick = closeLeaderboard;
+$("#lbModal").addEventListener("click", (e) => {
+  if (e.target.matches("[data-close-lb-modal]")) closeLeaderboard();
+});
+$("#lbTopBtn").onclick = () => openLeaderboard({ around: false });
+$("#lbMeBtn").onclick = () => openLeaderboard({ around: true });
 $("#lbUpBtn").onclick = () => {
   if (state.lb.minPage > 1) loadLbPage(state.lb.minPage - 1, "top");
   else $("#lbScroll").scrollTop = 0;
@@ -1252,7 +1388,7 @@ $("#lbDownBtn").onclick = () => {
 {
   const scroll = $("#lbScroll");
   scroll.addEventListener("scroll", () => {
-    if (state.lb.loading) return;
+    if (!state.lb.open || state.lb.loading) return;
     const nearTop = scroll.scrollTop < 80;
     const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
     if (nearBottom && state.lb.maxPage < state.lb.pageCount) {
@@ -1290,6 +1426,8 @@ $("#quitRunModal").addEventListener("click", (e) => {
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("#quitRunModal").classList.contains("hidden")) {
     closeQuitRunModal();
+  } else if (e.key === "Escape" && state.lb.open) {
+    closeLeaderboard();
   }
 });
 $("#nextRoundBtn").onclick = () => renderRun();

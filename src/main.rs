@@ -98,6 +98,11 @@ enum ClientMsg {
     RenamePlayer {
         name: String,
     },
+    SetProfile {
+        player_id: String,
+        name: String,
+        selected_avatar: String,
+    },
     BuyCharacter {
         slot: usize,
         target: usize,
@@ -144,6 +149,7 @@ enum ServerMsg {
     Defs {
         characters: Vec<CharacterDef>,
         items: Vec<ItemDef>,
+        profile_avatars: Vec<ProfileAvatarDef>,
         constants: Constants,
         site_stats: SiteStats,
     },
@@ -153,10 +159,16 @@ enum ServerMsg {
     },
     State {
         run: Run,
+        profile: PlayerProfile,
+    },
+    Profile {
+        profile: PlayerProfile,
     },
     Battle {
         run_id: String,
         opponent_name: String,
+        player_avatar: String,
+        opponent_avatar: String,
         player_mmr_before: i32,
         opponent_mmr_before: Option<i32>,
         events: Vec<game::combat::CombatEvent>,
@@ -195,12 +207,85 @@ struct Constants {
 struct LbEntry {
     player_id: String,
     name: String,
+    avatar: String,
     wins: i32,
     mmr: i32,
 }
 
 const DEFAULT_LEADERBOARD_PAGE_SIZE: usize = 10;
 const MAX_LEADERBOARD_PAGE_SIZE: usize = 50;
+const DEFAULT_PROFILE_AVATAR: &str = "meme_man";
+
+fn profile_avatar_defs() -> Vec<ProfileAvatarDef> {
+    vec![
+        profile_avatar("meme_man", "Meme Man", "Meme_Man.webp", 0, 0),
+        profile_avatar("orang", "Orang", "orang.webp", 3, 0),
+        profile_avatar("vegetal", "Vegetal", "vegetal.webp", 6, 0),
+        profile_avatar("dark_vegetal", "Dark Vegetal", "dark_vegetal.webp", 9, 0),
+        profile_avatar("picardia", "Picardia", "picardia.webp", 12, 0),
+        profile_avatar("lemen", "Lemen", "Lemen_man.webp", 15, 0),
+        profile_avatar(
+            "azul_picardia",
+            "Azul Picardia",
+            "azul_picardia.webp",
+            18,
+            0,
+        ),
+        profile_avatar("gren", "Gren", "gren.webp", 21, 0),
+        profile_avatar("isoceles", "Isoceles", "Isosceles.webp", 24, 0),
+        profile_avatar(
+            "omniscronchulon",
+            "Omniscronchulon",
+            "omniscronchulon.webp",
+            27,
+            0,
+        ),
+        profile_avatar("elephoont", "Elephoont", "elephoont.webp", MAX_WINS, 1),
+        profile_avatar("noggin", "Noggin", "Noggin.webp", 0, 10),
+        profile_avatar(
+            "pickle_rick",
+            "Pickle Rick",
+            "Pickle_rick_transparent_edgetrimmed.webp",
+            0,
+            100,
+        ),
+    ]
+}
+
+fn profile_avatar(
+    id: &str,
+    name: &str,
+    sprite: &str,
+    required_wins: i32,
+    required_ultimate_victories: i32,
+) -> ProfileAvatarDef {
+    ProfileAvatarDef {
+        id: id.into(),
+        name: name.into(),
+        sprite: sprite.into(),
+        required_wins,
+        required_ultimate_victories,
+    }
+}
+
+fn avatar_is_unlocked(profile: &PlayerProfile, avatar: &ProfileAvatarDef) -> bool {
+    profile.best_wins >= avatar.required_wins
+        && profile.ultimate_victories >= avatar.required_ultimate_victories
+}
+
+fn sanitize_profile_avatar(profile: &PlayerProfile, requested: &str) -> String {
+    profile_avatar_defs()
+        .into_iter()
+        .find(|avatar| avatar.id == requested && avatar_is_unlocked(profile, avatar))
+        .map(|avatar| avatar.id)
+        .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string())
+}
+
+fn sanitize_stored_profile(mut profile: PlayerProfile) -> PlayerProfile {
+    let selected = sanitize_profile_avatar(&profile, &profile.selected_avatar);
+    profile.selected_avatar = selected;
+    profile
+}
 
 fn insufficient_money_msg(price: i32, wallet: i32) -> String {
     format!(
@@ -268,6 +353,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         &ServerMsg::Defs {
             characters: character_defs().to_vec(),
             items: item_defs().to_vec(),
+            profile_avatars: profile_avatar_defs(),
             constants: Constants {
                 starting_money: STARTING_MONEY,
                 win_reward: WIN_REWARD,
@@ -312,6 +398,19 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 match cmsg {
                     ClientMsg::NewRun { player_id, name } => {
                         let player_id = clean_player_id(&player_id);
+                        let profile = match state.db.ensure_player_profile(&player_id, &name) {
+                            Ok(profile) => sanitize_stored_profile(profile),
+                            Err(e) => {
+                                send(
+                                    &mut socket,
+                                    &ServerMsg::Error {
+                                        message: e.to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
                         let mmr = match state.db.player_mmr(&player_id) {
                             Ok(Some(mmr)) => mmr,
                             Ok(None) => STARTING_MMR,
@@ -329,7 +428,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         let run = Run {
                             id: uuid::Uuid::new_v4().to_string(),
                             player_id,
-                            name: name.chars().take(24).collect(),
+                            name: profile.name.clone(),
                             money: STARTING_MONEY,
                             wins: 0,
                             losses: 0,
@@ -354,17 +453,48 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         }
                         register_socket_player(&state, &mut registered_player, &run.player_id);
                         current_run_id = Some(run.id.clone());
-                        send(&mut socket, &ServerMsg::State { run }).await;
+                        send(&mut socket, &ServerMsg::State { run, profile }).await;
                     }
                     ClientMsg::Resume { player_id } => {
                         let player_id = clean_player_id(&player_id);
                         register_socket_player(&state, &mut registered_player, &player_id);
                         match state.db.load_latest_run_for_player(&player_id) {
                             Ok(Some(run)) => {
+                                let mut profile = match state.db.ensure_player_profile(&player_id, &run.name) {
+                                    Ok(profile) => sanitize_stored_profile(profile),
+                                    Err(e) => {
+                                        send(
+                                            &mut socket,
+                                            &ServerMsg::Error {
+                                                message: e.to_string(),
+                                            },
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                };
+                                if profile.name == "anon" && run.name.trim() != "anon" && !run.name.trim().is_empty() {
+                                    profile = match state.db.backfill_profile_name(&player_id, &run.name) {
+                                        Ok(profile) => sanitize_stored_profile(profile),
+                                        Err(e) => {
+                                            send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await;
+                                            continue;
+                                        }
+                                    };
+                                }
+                                send(&mut socket, &ServerMsg::Profile { profile: profile.clone() }).await;
                                 current_run_id = Some(run.id.clone());
-                                send(&mut socket, &ServerMsg::State { run }).await;
+                                send(&mut socket, &ServerMsg::State { run, profile }).await;
                             }
                             Ok(None) => {
+                                let profile = match state.db.ensure_player_profile(&player_id, "anon") {
+                                    Ok(profile) => sanitize_stored_profile(profile),
+                                    Err(e) => {
+                                        send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await;
+                                        continue;
+                                    }
+                                };
+                                send(&mut socket, &ServerMsg::Profile { profile }).await;
                                 send(
                                     &mut socket,
                                     &ServerMsg::Error {
@@ -388,6 +518,35 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         match leaderboard_msg(&state, page, per_page, around_player_id.as_deref()) {
                             Ok(msg) => send(&mut socket, &msg).await,
                             Err(e) => send(&mut socket, &ServerMsg::Error { message: e }).await,
+                        }
+                    }
+                    ClientMsg::SetProfile { player_id, name, selected_avatar } => {
+                        let player_id = clean_player_id(&player_id);
+                        register_socket_player(&state, &mut registered_player, &player_id);
+                        let current_profile = match state.db.ensure_player_profile(&player_id, &name) {
+                            Ok(profile) => sanitize_stored_profile(profile),
+                            Err(e) => {
+                                send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await;
+                                continue;
+                            }
+                        };
+                        let avatar = sanitize_profile_avatar(&current_profile, &selected_avatar);
+                        let profile = match state.db.update_player_profile(&player_id, &name, &avatar) {
+                            Ok(profile) => sanitize_stored_profile(profile),
+                            Err(e) => {
+                                send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await;
+                                continue;
+                            }
+                        };
+                        send(&mut socket, &ServerMsg::Profile { profile: profile.clone() }).await;
+                        if let Some(id) = current_run_id.clone() {
+                            if let Ok(Some(mut run)) = state.db.load_run(&id) {
+                                run.name = profile.name.clone();
+                                let cost = run.build.cost_value();
+                                if state.db.upsert_run(&run, cost).is_ok() {
+                                    send(&mut socket, &ServerMsg::State { run, profile }).await;
+                                }
+                            }
                         }
                     }
                     other => {
@@ -430,7 +589,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                             ..
                                         })
                                     );
-                                    state.db.record_score_and_upsert_run(&run, cost, update_mmr)
+                                    let completed_ultimate_victory =
+                                        run.phase == Phase::GameOver && run.wins >= MAX_WINS;
+                                    state.db.record_score_and_upsert_run(
+                                        &run,
+                                        cost,
+                                        update_mmr,
+                                        completed_ultimate_victory,
+                                    )
                                 } else {
                                     state.db.upsert_run(&run, cost)
                                 };
@@ -444,13 +610,35 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     .await;
                                     continue;
                                 }
+                                if is_battle {
+                                    if let Ok(profile) = state.db.ensure_player_profile(&run.player_id, &run.name) {
+                                        send(
+                                            &mut socket,
+                                            &ServerMsg::Profile {
+                                                profile: sanitize_stored_profile(profile),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                }
                                 if let Some(extra) = extra {
                                     send(&mut socket, &extra).await;
                                     if is_battle {
                                         continue;
                                     }
                                 }
-                                send(&mut socket, &ServerMsg::State { run }).await;
+                                let profile = state
+                                    .db
+                                    .ensure_player_profile(&run.player_id, &run.name)
+                                    .map(sanitize_stored_profile)
+                                    .unwrap_or_else(|_| PlayerProfile {
+                                        player_id: run.player_id.clone(),
+                                        name: run.name.clone(),
+                                        selected_avatar: DEFAULT_PROFILE_AVATAR.to_string(),
+                                        best_wins: 0,
+                                        ultimate_victories: 0,
+                                    });
+                                send(&mut socket, &ServerMsg::State { run, profile }).await;
                             }
                             Err(e) => send(&mut socket, &ServerMsg::Error { message: e }).await,
                         }
@@ -691,12 +879,27 @@ async fn handle_run_action(
                 .db
                 .find_opponent(&run.id, &run.player_id, target_gold)
                 .map_err(|e| e.to_string())?;
-            let (op_name, op_build_raw, opponent_mmr_before) = match opponent {
-                Some((_id, name, b, mmr)) => (name, b, Some(mmr)),
+            let player_avatar = state
+                .db
+                .profile_avatar(&run.player_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
+            let (op_name, op_build_raw, opponent_mmr_before, opponent_avatar) = match opponent {
+                Some((_id, opponent_player_id, name, b, mmr)) => {
+                    let avatar = state
+                        .db
+                        .profile_avatar(&opponent_player_id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
+                    (name, b, Some(mmr), avatar)
+                }
                 None => (
                     synthetic_opponent_name(),
                     ai_ladder_build(target_gold.max(50)),
                     None,
+                    DEFAULT_PROFILE_AVATAR.to_string(),
                 ),
             };
             let res = resolve_battle(&run.build, &op_build_raw);
@@ -724,6 +927,8 @@ async fn handle_run_action(
             Ok(Some(ServerMsg::Battle {
                 run_id: run.id.clone(),
                 opponent_name: op_name,
+                player_avatar,
+                opponent_avatar,
                 player_mmr_before,
                 opponent_mmr_before,
                 events: res.events,
@@ -797,9 +1002,10 @@ fn leaderboard_msg(
     Ok(ServerMsg::Leaderboard {
         entries: entries
             .into_iter()
-            .map(|(player_id, name, _streak, wins, mmr)| LbEntry {
+            .map(|(player_id, name, _streak, wins, mmr, avatar)| LbEntry {
                 player_id,
                 name,
+                avatar,
                 wins,
                 mmr,
             })

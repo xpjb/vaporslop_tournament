@@ -16,12 +16,22 @@ const BGM_VOLUME_KEY = "bgmVolume";
 const BGM_MUTED_KEY = "bgmMuted";
 const LB_PAGE_SIZE = 25;
 const BGM_CROSSFADE_MS = 1000;
+const DEFAULT_AVATAR_ID = "meme_man";
 
 const state = {
   ws: null,
   defs: { characters: [], items: [] },
+  profileAvatars: [],
   consts: {},
   run: null,
+  profile: {
+    player_id: "",
+    name: localStorage.getItem(NICKNAME_KEY) || "anon",
+    selected_avatar: DEFAULT_AVATAR_ID,
+    best_wins: 0,
+    ultimate_victories: 0,
+  },
+  profileDraftAvatar: DEFAULT_AVATAR_ID,
   pendingItem: null, // shop item slot waiting for team target
   lastBattle: null,
   battleAnimating: false,
@@ -176,7 +186,11 @@ function setBgmAltActive(active) {
 function syncBgmControls() {
   applyBgmMix();
   const slider = $("#bgmVolume");
-  if (slider) slider.value = String(Math.round(state.bgmVolume * 100));
+  if (slider) {
+    const volumePct = Math.round(state.bgmVolume * 100);
+    slider.value = String(volumePct);
+    slider.style.setProperty("--bgm-volume-pct", `${volumePct}%`);
+  }
   const btn = $("#bgmMuteBtn");
   if (!btn) return;
   const muted = state.bgmMuted || state.bgmVolume <= 0;
@@ -237,11 +251,140 @@ function syncSiteStats(s) {
 function setNickname(name, notifyServer = true) {
   const next = (name || "anon").trim().slice(0, 24) || "anon";
   state.nickname = next;
+  state.profile.name = next;
   localStorage.setItem(NICKNAME_KEY, next);
-  $("#nameInput").value = next;
-  $("#hudNameInput").value = next;
+  const profileInput = $("#profileNameInput");
+  if (profileInput && document.activeElement !== profileInput) profileInput.value = next;
   if (state.run) state.run.name = next;
   if (notifyServer && state.run) send({ type: "rename_player", name: next });
+  renderProfilePill();
+}
+
+function profileAvatarDef(id = state.profile?.selected_avatar) {
+  return state.profileAvatars.find((a) => a.id === id)
+    || state.profileAvatars.find((a) => a.id === DEFAULT_AVATAR_ID)
+    || { id: DEFAULT_AVATAR_ID, name: "Meme Man", sprite: "Meme_Man.webp", required_wins: 0, required_ultimate_victories: 0 };
+}
+
+function avatarUnlocked(avatar) {
+  if (!avatar) return false;
+  return (state.profile.best_wins || 0) >= (avatar.required_wins || 0)
+    && (state.profile.ultimate_victories || 0) >= (avatar.required_ultimate_victories || 0);
+}
+
+function avatarRequirementText(avatar) {
+  if (!avatar || avatarUnlocked(avatar)) return "unlocked";
+  if (avatar.required_ultimate_victories) {
+    return `${avatar.required_ultimate_victories} ultimate victor${avatar.required_ultimate_victories === 1 ? "y" : "ies"}`;
+  }
+  return `reach ${avatar.required_wins} wins`;
+}
+
+function avatarImgHtml(avatarId, className = "identity-avatar") {
+  const avatar = profileAvatarDef(avatarId);
+  return `<span class="${className}"><img src="${assetHref(avatar.sprite)}" alt="${escape(avatar.name)}" /></span>`;
+}
+
+function characterStatsHtml(cd) {
+  return `<div class="stats char-stats">
+    <span title="might">⚔${cd.might}</span>
+    <span title="quickness">⚡${cd.reflexes}</span>
+    <span title="wisdom">✦${cd.wisdom}</span>
+    <span title="hp">❤${cd.hp}</span>
+  </div>`;
+}
+
+function applyProfile(profile) {
+  if (!profile) return;
+  state.profile = { ...state.profile, ...profile };
+  state.profile.player_id = state.profile.player_id || state.playerId;
+  state.nickname = state.profile.name || "anon";
+  localStorage.setItem(NICKNAME_KEY, state.nickname);
+  renderProfilePill();
+  renderAvatarGrid();
+  const profileInput = $("#profileNameInput");
+  if (profileInput && document.activeElement !== profileInput) profileInput.value = state.nickname;
+  if (state.run) state.run.name = state.nickname;
+}
+
+function renderProfilePill() {
+  const avatar = profileAvatarDef(state.profile?.selected_avatar);
+  const img = $("#profilePillAvatar");
+  if (img) {
+    img.src = assetHref(avatar.sprite);
+    img.alt = avatar.name;
+  }
+  const name = $("#profilePillName");
+  if (name) name.textContent = state.profile?.name || state.nickname || "anon";
+  const modalImg = $("#profileModalAvatar");
+  if (modalImg) {
+    modalImg.src = assetHref(profileAvatarDef(state.profileDraftAvatar || state.profile?.selected_avatar).sprite);
+    modalImg.alt = profileAvatarDef(state.profileDraftAvatar || state.profile?.selected_avatar).name;
+  }
+  const progress = $("#profileProgress");
+  if (progress) {
+    progress.textContent = `best reach: ${state.profile.best_wins || 0} wins · ultimate victories: ${state.profile.ultimate_victories || 0}`;
+  }
+}
+
+function renderAvatarGrid() {
+  const grid = $("#profileAvatarGrid");
+  if (!grid || !state.profileAvatars.length) return;
+  const selected = state.profileDraftAvatar || state.profile.selected_avatar || DEFAULT_AVATAR_ID;
+  grid.innerHTML = state.profileAvatars.map((avatar) => {
+    const unlocked = avatarUnlocked(avatar);
+    const isSelected = avatar.id === selected;
+    return `<button class="profile-avatar-card${unlocked ? "" : " locked"}${isSelected ? " selected" : ""}" type="button" data-avatar-id="${escape(avatar.id)}" ${unlocked ? "" : "disabled"}>
+      <span class="profile-avatar profile-avatar--grid"><img src="${assetHref(avatar.sprite)}" alt="${escape(avatar.name)}" /></span>
+      <span class="profile-avatar-requirement">${escape(avatarRequirementText(avatar))}</span>
+    </button>`;
+  }).join("");
+  grid.querySelectorAll("[data-avatar-id]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const selectedAvatar = btn.dataset.avatarId;
+      state.profileDraftAvatar = selectedAvatar;
+      state.profile.selected_avatar = selectedAvatar;
+      renderProfilePill();
+      renderAvatarGrid();
+      saveProfile();
+    });
+  });
+}
+
+function openProfileModal() {
+  state.profileDraftAvatar = state.profile.selected_avatar || DEFAULT_AVATAR_ID;
+  $("#profileNameInput").value = state.profile.name || state.nickname || "anon";
+  renderProfilePill();
+  renderAvatarGrid();
+  $("#profileModal").classList.remove("hidden");
+  $("#profileNameInput")?.focus();
+}
+
+function closeProfileModal() {
+  $("#profileModal").classList.add("hidden");
+  $("#profilePill")?.focus();
+}
+
+function openHelpModal() {
+  $("#helpModal").classList.remove("hidden");
+  $("#helpCloseBtn")?.focus();
+}
+
+function closeHelpModal() {
+  $("#helpModal").classList.add("hidden");
+  $("#helpBtn")?.focus();
+}
+
+function saveProfile() {
+  const name = ($("#profileNameInput").value || state.nickname || "anon").trim().slice(0, 24) || "anon";
+  state.profileDraftAvatar = state.profileDraftAvatar || state.profile.selected_avatar || DEFAULT_AVATAR_ID;
+  setNickname(name, false);
+  send({
+    type: "set_profile",
+    player_id: state.playerId,
+    name,
+    selected_avatar: state.profileDraftAvatar,
+  });
 }
 
 function stopGameOverReplay() {
@@ -272,9 +415,6 @@ function syncRunHudVisibility() {
 function syncRunHudValues() {
   const r = state.run;
   if (!r) return;
-  if (document.activeElement !== $("#hudNameInput")) {
-    $("#hudNameInput").value = r.name;
-  }
   $("#hudMoney").textContent = r.money;
   $("#hudWins").textContent = r.wins;
   $("#hudLosses").textContent = r.losses;
@@ -314,7 +454,7 @@ function resumeRun(quiet = false) {
 }
 
 function startNewRun() {
-  setNickname($("#nameInput").value || state.nickname, false);
+  setNickname(state.profile.name || state.nickname, false);
   state.lastBattle = null;
   state.battleAnimating = false;
   stopGameOverReplay();
@@ -339,17 +479,22 @@ function handleServer(msg) {
     case "defs":
       state.defs.characters = msg.characters;
       state.defs.items = msg.items;
+      state.profileAvatars = msg.profile_avatars || [];
       state.consts = msg.constants;
       $("#hudMaxLosses").textContent = msg.constants.max_losses;
       $("#goMaxWins").textContent = msg.constants.max_wins;
       $("#rerollCost").textContent = msg.constants.reroll_cost;
       if (msg.site_stats) syncSiteStats(msg.site_stats);
+      renderProfilePill();
       resumeRun(true);
+      break;
+    case "profile":
+      applyProfile(msg.profile);
       break;
     case "state":
       state.autoResumePending = false;
       state.run = msg.run;
-      setNickname(msg.run.name, false);
+      applyProfile(msg.profile || { name: msg.run.name, selected_avatar: state.profile.selected_avatar });
       renderRun();
       break;
     case "battle":
@@ -382,8 +527,8 @@ function handleServer(msg) {
       }
       syncRunHudValues();
       show("battle");
-      $("#leftName").textContent = formatPlayerName(state.run?.name ?? "you", msg.player_mmr_before);
-      $("#rightName").textContent = formatPlayerName(msg.opponent_name, msg.opponent_mmr_before, {
+      renderIdentity($("#leftName"), state.run?.name ?? "you", msg.player_mmr_before, msg.player_avatar || state.profile.selected_avatar);
+      renderIdentity($("#rightName"), msg.opponent_name, msg.opponent_mmr_before, msg.opponent_avatar || DEFAULT_AVATAR_ID, {
         unknownMmr: msg.opponent_mmr_before == null,
       });
       $("#nextRoundBtn").classList.add("hidden");
@@ -447,6 +592,11 @@ function formatPlayerName(name, mmr, opts = {}) {
   const value = Number(mmr);
   if (!Number.isFinite(value)) return label;
   return `${label} (${Math.round(value)})`;
+}
+function renderIdentity(el, name, mmr, avatarId, opts = {}) {
+  if (!el) return;
+  el.classList.add("identity-chip");
+  el.innerHTML = `${avatarImgHtml(avatarId)}<span>${escape(formatPlayerName(name, mmr, opts))}</span>`;
 }
 const charDef = (id) => state.defs.characters.find(c => c.id === id);
 const itemDef = (id) => state.defs.items.find(i => i.id === id);
@@ -967,7 +1117,7 @@ function renderLeaderboardList() {
       const top3 = e.rank <= 3 ? ` lb-row--top${e.rank}` : "";
       return `<li class="lb-row${isMe ? " lb-row--me" : ""}${top3}" data-rank="${e.rank}">
         <span class="lb-rank">#${e.rank}</span>
-        <span class="lb-name">${escape(e.name || "anon")}${isMe ? ' <span class="lb-you">you</span>' : ""}</span>
+        <span class="lb-name">${avatarImgHtml(e.avatar)}<span>${escape(e.name || "anon")}${isMe ? ' <span class="lb-you">you</span>' : ""}</span></span>
         <span class="lb-mmr">${e.mmr}</span>
         <span class="lb-stats">w<b>${e.wins}</b></span>
       </li>`;
@@ -1020,8 +1170,8 @@ function populateGameOver(r, battleMsg) {
   const wrap = $("#goReplayWrap");
   if (battleMsg && battleMsg.events && battleMsg.events.length) {
     wrap.classList.remove("hidden");
-    $("#goLeftName").textContent = formatPlayerName(r.name ?? "you", battleMsg.player_mmr_before);
-    $("#goRightName").textContent = formatPlayerName(battleMsg.opponent_name, battleMsg.opponent_mmr_before, {
+    renderIdentity($("#goLeftName"), r.name ?? "you", battleMsg.player_mmr_before, battleMsg.player_avatar || state.profile.selected_avatar);
+    renderIdentity($("#goRightName"), battleMsg.opponent_name, battleMsg.opponent_mmr_before, battleMsg.opponent_avatar || DEFAULT_AVATAR_ID, {
       unknownMmr: battleMsg.opponent_mmr_before == null,
     });
     const key = `${r.id}:${battleMsg.events.length}`;
@@ -1082,7 +1232,7 @@ function renderTeam() {
       slot.innerHTML = `
         <img class="portrait" src="${assetHref(cd.sprite)}" />
         <div class="name">${cd.name}</div>
-        <div class="stats">⚔${cd.might} ⚡${cd.reflexes} ✦${cd.wisdom} ❤${cd.hp}</div>
+        ${characterStatsHtml(cd)}
         <div class="cost">$${cd.cost}</div>
       `;
       slot.appendChild(renderItemSockets(i, m));
@@ -1359,7 +1509,7 @@ function renderShop() {
     c.innerHTML = `
       <img src="${assetHref(cd.sprite)}" />
       <div class="name">${cd.name}</div>
-      <div class="stats">⚔${cd.might} ⚡${cd.reflexes} ✦${cd.wisdom} ❤${cd.hp}</div>
+      ${characterStatsHtml(cd)}
       <div class="cost">$${cd.cost}</div>
     `;
     attachTooltip(c, () => characterTooltip(cd));
@@ -1466,26 +1616,21 @@ function wireInventoryDrop() {
 }
 
 // Wire UI
-$("#nameInput").value = state.nickname;
-$("#hudNameInput").value = state.nickname;
+state.profile.player_id = state.playerId;
+renderProfilePill();
 ensureBgmAudio();
 $("#bgmMuteBtn").onclick = () => setBgmMuted(!(state.bgmMuted || state.bgmVolume <= 0));
 $("#bgmVolume").addEventListener("input", (e) => setBgmVolume(e.currentTarget.value));
 window.addEventListener("pointerdown", startBgm, { once: true });
 window.addEventListener("keydown", startBgm, { once: true });
-$("#saveStartNicknameBtn").onclick = () => {
-  setNickname($("#nameInput").value);
-  flash("nickname saved", { variant: "info" });
-};
-$("#saveNicknameBtn").onclick = () => {
-  setNickname($("#hudNameInput").value);
-  flash("nickname saved", { variant: "info" });
-};
-$("#nameInput").addEventListener("change", () => setNickname($("#nameInput").value, false));
-$("#hudNameInput").addEventListener("keydown", (e) => {
+$("#profilePill").onclick = openProfileModal;
+$("#helpBtn").onclick = openHelpModal;
+$("#profileCloseBtn").onclick = closeProfileModal;
+$("#helpCloseBtn").onclick = closeHelpModal;
+$("#saveProfileBtn").onclick = saveProfile;
+$("#profileNameInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
-    setNickname($("#hudNameInput").value);
-    flash("nickname saved", { variant: "info" });
+    saveProfile();
   }
 });
 $("#newRunBtn").onclick = () => {
@@ -1495,6 +1640,12 @@ $("#openLbBtn").onclick = () => openLeaderboard();
 $("#lbCloseBtn").onclick = closeLeaderboard;
 $("#lbModal").addEventListener("click", (e) => {
   if (e.target.matches("[data-close-lb-modal]")) closeLeaderboard();
+});
+$("#profileModal").addEventListener("click", (e) => {
+  if (e.target.matches("[data-close-profile-modal]")) closeProfileModal();
+});
+$("#helpModal").addEventListener("click", (e) => {
+  if (e.target.matches("[data-close-help-modal]")) closeHelpModal();
 });
 $("#lbTopBtn").onclick = () => openLeaderboard({ around: false });
 $("#lbMeBtn").onclick = () => openLeaderboard({ around: true });
@@ -1547,6 +1698,10 @@ $("#quitRunModal").addEventListener("click", (e) => {
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("#quitRunModal").classList.contains("hidden")) {
     closeQuitRunModal();
+  } else if (e.key === "Escape" && !$("#helpModal").classList.contains("hidden")) {
+    closeHelpModal();
+  } else if (e.key === "Escape" && !$("#profileModal").classList.contains("hidden")) {
+    closeProfileModal();
   } else if (e.key === "Escape" && state.lb.open) {
     closeLeaderboard();
   }

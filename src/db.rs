@@ -109,6 +109,15 @@ impl Db {
                 PRIMARY KEY (player_id, day_id)
             );",
         )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS player_profiles (
+                player_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                selected_avatar TEXT NOT NULL DEFAULT 'meme_man',
+                best_wins INTEGER NOT NULL DEFAULT 0,
+                ultimate_victories INTEGER NOT NULL DEFAULT 0
+            );",
+        )?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -142,6 +151,64 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(n as u32)
+    }
+
+    pub fn ensure_player_profile(&self, player_id: &str, name: &str) -> Result<PlayerProfile> {
+        let conn = self.conn.lock();
+        ensure_player_profile_on(&conn, player_id, name)
+    }
+
+    pub fn update_player_profile(
+        &self,
+        player_id: &str,
+        name: &str,
+        selected_avatar: &str,
+    ) -> Result<PlayerProfile> {
+        let name = clean_profile_name(name);
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO player_profiles(player_id,name,selected_avatar)
+             VALUES(?1,?2,?3)
+             ON CONFLICT(player_id) DO UPDATE SET
+               name=excluded.name,
+               selected_avatar=excluded.selected_avatar",
+            params![player_id, name, selected_avatar],
+        )?;
+        conn.execute(
+            "UPDATE runs SET name = ?2 WHERE player_id = ?1",
+            params![player_id, name],
+        )?;
+        conn.execute(
+            "UPDATE leaderboard SET name = ?2 WHERE player_id = ?1",
+            params![player_id, name],
+        )?;
+        load_player_profile_on(&conn, player_id)
+    }
+
+    pub fn backfill_profile_name(&self, player_id: &str, name: &str) -> Result<PlayerProfile> {
+        let name = clean_profile_name(name);
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE player_profiles
+             SET name = ?2
+             WHERE player_id = ?1
+               AND name = 'anon'
+               AND ?2 != 'anon'",
+            params![player_id, name],
+        )?;
+        load_player_profile_on(&conn, player_id)
+    }
+
+    pub fn profile_avatar(&self, player_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT selected_avatar FROM player_profiles WHERE player_id = ?1")?;
+        let mut rows = stmt.query([player_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn upsert_run(&self, run: &Run, cost: i32) -> Result<()> {
@@ -219,14 +286,14 @@ impl Db {
         current_run_id: &str,
         current_player_id: &str,
         target_cost: i32,
-    ) -> Result<Option<(String, String, Build, i32)>> {
+    ) -> Result<Option<(String, String, String, Build, i32)>> {
         let conn = self.conn.lock();
         let down = ((target_cost as f32) * 0.15).ceil().max(1.0) as i32;
         let up = ((target_cost as f32) * 0.05).ceil().max(1.0) as i32;
         let min_cost = (target_cost - down).max(0);
         let max_cost = target_cost + up;
         let mut stmt = conn.prepare(
-            "SELECT id,name,build_json,mmr FROM runs
+            "SELECT id,player_id,name,build_json,mmr FROM runs
              WHERE id != ?1
                AND player_id != ?2
                AND cost_value BETWEEN ?3 AND ?4",
@@ -237,15 +304,16 @@ impl Db {
             min_cost,
             max_cost
         ])?;
-        let mut candidates: Vec<(String, String, Build, i32)> = vec![];
+        let mut candidates: Vec<(String, String, String, Build, i32)> = vec![];
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let bjson: String = row.get(2)?;
-            let mmr: i32 = row.get(3)?;
+            let player_id: String = row.get(1)?;
+            let name: String = row.get(2)?;
+            let bjson: String = row.get(3)?;
+            let mmr: i32 = row.get(4)?;
             let build: Build = serde_json::from_str(&bjson)?;
             if !build.team.is_empty() {
-                candidates.push((id, name, build, mmr));
+                candidates.push((id, player_id, name, build, mmr));
             }
         }
         let mut rng = rand::thread_rng();
@@ -267,6 +335,7 @@ impl Db {
         }
     }
 
+    #[cfg(test)]
     pub fn record_score(
         &self,
         player_id: &str,
@@ -285,9 +354,17 @@ impl Db {
         run: &Run,
         cost: i32,
         update_mmr: bool,
+        completed_ultimate_victory: bool,
     ) -> Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
+        record_profile_progress_on(
+            &tx,
+            &run.player_id,
+            &run.name,
+            run.wins,
+            completed_ultimate_victory,
+        )?;
         record_score_on(
             &tx,
             &run.player_id,
@@ -306,7 +383,7 @@ impl Db {
         &self,
         page: usize,
         per_page: usize,
-    ) -> Result<(Vec<(String, String, i32, i32, i32)>, usize)> {
+    ) -> Result<(Vec<(String, String, i32, i32, i32, String)>, usize)> {
         let conn = self.conn.lock();
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM leaderboard", [], |r| r.get(0))?;
         let page_count = if total == 0 {
@@ -317,8 +394,10 @@ impl Db {
         let page = page.clamp(1, page_count);
         let offset = (page - 1) * per_page;
         let mut stmt = conn.prepare(
-            "SELECT player_id,name,streak,wins,mmr FROM leaderboard
-             ORDER BY mmr DESC, wins DESC, streak DESC, updated_at ASC
+            "SELECT l.player_id,l.name,l.streak,l.wins,l.mmr,COALESCE(p.selected_avatar,'meme_man')
+             FROM leaderboard l
+             LEFT JOIN player_profiles p ON p.player_id = l.player_id
+             ORDER BY l.mmr DESC, l.wins DESC, l.streak DESC, l.updated_at ASC
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![per_page as i64, offset as i64], |r| {
@@ -328,6 +407,7 @@ impl Db {
                 r.get(2)?,
                 r.get(3)?,
                 r.get(4)?,
+                r.get(5)?,
             ))
         })?;
         Ok((rows.filter_map(|r| r.ok()).collect(), page_count))
@@ -370,6 +450,72 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
     conn.execute(
         &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
         [],
+    )?;
+    Ok(())
+}
+
+fn clean_profile_name(name: &str) -> String {
+    let name: String = name.trim().chars().take(24).collect();
+    if name.is_empty() {
+        "anon".to_string()
+    } else {
+        name
+    }
+}
+
+fn load_player_profile_on(conn: &Connection, player_id: &str) -> Result<PlayerProfile> {
+    conn.query_row(
+        "SELECT player_id,name,selected_avatar,best_wins,ultimate_victories
+         FROM player_profiles
+         WHERE player_id = ?1",
+        [player_id],
+        |row| {
+            Ok(PlayerProfile {
+                player_id: row.get(0)?,
+                name: row.get(1)?,
+                selected_avatar: row.get(2)?,
+                best_wins: row.get(3)?,
+                ultimate_victories: row.get(4)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+fn ensure_player_profile_on(
+    conn: &Connection,
+    player_id: &str,
+    name: &str,
+) -> Result<PlayerProfile> {
+    let name = clean_profile_name(name);
+    conn.execute(
+        "INSERT OR IGNORE INTO player_profiles(player_id,name,selected_avatar,best_wins,ultimate_victories)
+         VALUES(?1,?2,'meme_man',0,0)",
+        params![player_id, name],
+    )?;
+    load_player_profile_on(conn, player_id)
+}
+
+fn record_profile_progress_on(
+    conn: &Connection,
+    player_id: &str,
+    name: &str,
+    wins: i32,
+    completed_ultimate_victory: bool,
+) -> Result<()> {
+    ensure_player_profile_on(conn, player_id, name)?;
+    conn.execute(
+        "UPDATE player_profiles
+         SET name = ?2,
+             best_wins = MAX(best_wins, ?3),
+             ultimate_victories = ultimate_victories + ?4
+         WHERE player_id = ?1",
+        params![
+            player_id,
+            clean_profile_name(name),
+            wins,
+            if completed_ultimate_victory { 1 } else { 0 },
+        ],
     )?;
     Ok(())
 }
@@ -538,7 +684,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.0, "opponent");
-        assert_eq!(found.3, STARTING_MMR);
+        assert_eq!(found.4, STARTING_MMR);
     }
 
     #[test]
@@ -579,13 +725,27 @@ mod tests {
         assert_eq!(pages, 2);
         assert_eq!(
             entries,
-            vec![("player-2".to_string(), "winner".to_string(), 3, 5, 1100)]
+            vec![(
+                "player-2".to_string(),
+                "winner".to_string(),
+                3,
+                5,
+                1100,
+                "meme_man".to_string()
+            )]
         );
 
         let (entries, _) = db.leaderboard(2, 1).unwrap();
         assert_eq!(
             entries,
-            vec![("player-1".to_string(), "new name".to_string(), 2, 4, 1000)]
+            vec![(
+                "player-1".to_string(),
+                "new name".to_string(),
+                2,
+                4,
+                1000,
+                "meme_man".to_string()
+            )]
         );
     }
 
@@ -604,10 +764,74 @@ mod tests {
         assert_eq!(
             entries,
             vec![
-                ("player-2".to_string(), "high mmr".to_string(), 1, 1, 1200),
-                ("player-1".to_string(), "low mmr".to_string(), 5, 10, 900),
+                (
+                    "player-2".to_string(),
+                    "high mmr".to_string(),
+                    1,
+                    1,
+                    1200,
+                    "meme_man".to_string()
+                ),
+                (
+                    "player-1".to_string(),
+                    "low mmr".to_string(),
+                    5,
+                    10,
+                    900,
+                    "meme_man".to_string()
+                ),
             ]
         );
+    }
+
+    #[test]
+    fn player_profile_defaults_and_updates() {
+        let db = test_db();
+        let profile = db.ensure_player_profile("player-1", "  vapor  ").unwrap();
+        assert_eq!(profile.player_id, "player-1");
+        assert_eq!(profile.name, "vapor");
+        assert_eq!(profile.selected_avatar, "meme_man");
+        assert_eq!(profile.best_wins, 0);
+        assert_eq!(profile.ultimate_victories, 0);
+
+        let profile = db
+            .update_player_profile("player-1", "new vapor", "orang")
+            .unwrap();
+        assert_eq!(profile.name, "new vapor");
+        assert_eq!(profile.selected_avatar, "orang");
+    }
+
+    #[test]
+    fn profile_name_backfill_only_replaces_placeholder_name() {
+        let db = test_db();
+        db.ensure_player_profile("player-1", "anon").unwrap();
+
+        let profile = db.backfill_profile_name("player-1", "old handle").unwrap();
+        assert_eq!(profile.name, "old handle");
+
+        let profile = db.backfill_profile_name("player-1", "new handle").unwrap();
+        assert_eq!(profile.name, "old handle");
+    }
+
+    #[test]
+    fn profile_progress_tracks_best_wins_and_ultimate_victories() {
+        let db = test_db();
+        let mut run = run_with_build("winner", "winner", one_member_build("orang"));
+        run.player_id = "player-1".to_string();
+        run.wins = 12;
+
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), true, false)
+            .unwrap();
+        let profile = db.ensure_player_profile("player-1", "winner").unwrap();
+        assert_eq!(profile.best_wins, 12);
+        assert_eq!(profile.ultimate_victories, 0);
+
+        run.wins = MAX_WINS;
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), true, true)
+            .unwrap();
+        let profile = db.ensure_player_profile("player-1", "winner").unwrap();
+        assert_eq!(profile.best_wins, MAX_WINS);
+        assert_eq!(profile.ultimate_victories, 1);
     }
 
     #[test]
@@ -692,7 +916,7 @@ mod tests {
         run.money = 200;
         run.phase = Phase::Shop;
 
-        db.record_score_and_upsert_run(&run, run.build.cost_value(), true)
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), true, false)
             .unwrap();
 
         let loaded = db.load_run("winner").unwrap().unwrap();
@@ -703,7 +927,14 @@ mod tests {
         let (entries, _) = db.leaderboard(1, 10).unwrap();
         assert_eq!(
             entries,
-            vec![("player-1".to_string(), "winner".to_string(), 1, 1, 1016)]
+            vec![(
+                "player-1".to_string(),
+                "winner".to_string(),
+                1,
+                1,
+                1016,
+                "meme_man".to_string()
+            )]
         );
     }
 
@@ -716,12 +947,12 @@ mod tests {
         run.best_streak = 1;
         run.mmr = 1100;
 
-        db.record_score_and_upsert_run(&run, run.build.cost_value(), true)
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), true, false)
             .unwrap();
         run.wins = 2;
         run.best_streak = 2;
         run.mmr = 1300;
-        db.record_score_and_upsert_run(&run, run.build.cost_value(), false)
+        db.record_score_and_upsert_run(&run, run.build.cost_value(), false, false)
             .unwrap();
 
         let loaded = db.load_run("winner").unwrap().unwrap();
@@ -730,7 +961,14 @@ mod tests {
         let (entries, _) = db.leaderboard(1, 10).unwrap();
         assert_eq!(
             entries,
-            vec![("player-1".to_string(), "winner".to_string(), 2, 2, 1100)]
+            vec![(
+                "player-1".to_string(),
+                "winner".to_string(),
+                2,
+                2,
+                1100,
+                "meme_man".to_string()
+            )]
         );
     }
 

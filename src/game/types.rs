@@ -137,6 +137,24 @@ pub struct ItemDef {
     pub properties: Vec<Property>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerProfile {
+    pub player_id: String,
+    pub name: String,
+    pub selected_avatar: String,
+    pub best_wins: i32,
+    pub ultimate_victories: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileAvatarDef {
+    pub id: String,
+    pub name: String,
+    pub sprite: String,
+    pub required_wins: i32,
+    pub required_ultimate_victories: i32,
+}
+
 /// A character placed on a team — references defs and equipped item ids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamMember {

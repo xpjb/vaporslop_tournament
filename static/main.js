@@ -15,6 +15,7 @@ const NICKNAME_KEY = "playerNickname";
 const BGM_VOLUME_KEY = "bgmVolume";
 const BGM_MUTED_KEY = "bgmMuted";
 const LB_PAGE_SIZE = 25;
+const BGM_CROSSFADE_MS = 1000;
 
 const state = {
   ws: null,
@@ -28,8 +29,12 @@ const state = {
   playerId: getOrCreatePlayerId(),
   nickname: localStorage.getItem(NICKNAME_KEY) || "anon",
   bgmAudio: null,
+  bgmAltAudio: null,
   bgmVolume: getStoredBgmVolume(),
   bgmMuted: localStorage.getItem(BGM_MUTED_KEY) === "1",
+  bgmAltActive: false,
+  bgmAltMix: 0,
+  bgmFadeRaf: null,
   lb: {
     entries: [], // contiguous list of {rank, player_id, name, mmr, wins}
     minPage: null,
@@ -71,12 +76,105 @@ function ensureBgmAudio() {
   return audio;
 }
 
-function syncBgmControls() {
-  const audio = state.bgmAudio;
-  if (audio) {
-    audio.volume = state.bgmVolume;
-    audio.muted = state.bgmMuted || state.bgmVolume <= 0;
+function ensureBgmAltAudio() {
+  if (state.bgmAltAudio) return state.bgmAltAudio;
+  const audio = new Audio(assetHref("staticeulogy-deepfried.opus"));
+  audio.loop = true;
+  audio.preload = "auto";
+  state.bgmAltAudio = audio;
+  syncBgmControls();
+  return audio;
+}
+
+function usableBgmVolume() {
+  return state.bgmMuted || state.bgmVolume <= 0 ? 0 : state.bgmVolume;
+}
+
+function applyBgmMix() {
+  const volume = usableBgmVolume();
+  const muted = volume <= 0;
+  const mix = Math.max(0, Math.min(1, state.bgmAltMix || 0));
+  if (state.bgmAudio) {
+    state.bgmAudio.volume = volume * (1 - mix);
+    state.bgmAudio.muted = muted;
   }
+  if (state.bgmAltAudio) {
+    state.bgmAltAudio.volume = volume * mix;
+    state.bgmAltAudio.muted = muted;
+  }
+}
+
+function alignBgmTime(source, target) {
+  if (!source || !target) return;
+  const apply = () => {
+    const sourceTime = Number.isFinite(source.currentTime) ? source.currentTime : 0;
+    const targetDuration = Number.isFinite(target.duration) && target.duration > 0 ? target.duration : null;
+    const targetTime = targetDuration ? sourceTime % targetDuration : sourceTime;
+    try {
+      target.currentTime = Math.max(0, targetTime);
+    } catch {
+      // Some browsers reject currentTime before metadata is ready; the fade still works.
+    }
+  };
+  if (target.readyState >= 1) apply();
+  else target.addEventListener("loadedmetadata", apply, { once: true });
+}
+
+function finishBgmFade() {
+  state.bgmFadeRaf = null;
+  applyBgmMix();
+  if (usableBgmVolume() <= 0) {
+    state.bgmAudio?.pause();
+    state.bgmAltAudio?.pause();
+  } else if (state.bgmAltMix >= 1) {
+    state.bgmAudio?.pause();
+  } else if (state.bgmAltMix <= 0) {
+    state.bgmAltAudio?.pause();
+  }
+}
+
+function playBgmForMix(playBoth = false) {
+  if (usableBgmVolume() <= 0) return;
+  if (playBoth || state.bgmAltMix < 1) state.bgmAudio?.play().catch(() => {});
+  if (playBoth || state.bgmAltActive || state.bgmAltMix > 0) state.bgmAltAudio?.play().catch(() => {});
+}
+
+function setBgmAltActive(active) {
+  const targetMix = active ? 1 : 0;
+  if (state.bgmAltActive === active && state.bgmAltMix === targetMix) return;
+
+  state.bgmAltActive = active;
+  if (state.bgmFadeRaf) {
+    cancelAnimationFrame(state.bgmFadeRaf);
+    state.bgmFadeRaf = null;
+  }
+
+  const normal = ensureBgmAudio();
+  const alt = ensureBgmAltAudio();
+  if (active) alignBgmTime(normal, alt);
+  else alignBgmTime(alt, normal);
+
+  const startMix = Math.max(0, Math.min(1, state.bgmAltMix || 0));
+  const startedAt = performance.now();
+  applyBgmMix();
+  playBgmForMix(true);
+
+  const step = (now) => {
+    const t = Math.min(1, (now - startedAt) / BGM_CROSSFADE_MS);
+    state.bgmAltMix = startMix + (targetMix - startMix) * t;
+    applyBgmMix();
+    if (t < 1) {
+      state.bgmFadeRaf = requestAnimationFrame(step);
+    } else {
+      state.bgmAltMix = targetMix;
+      finishBgmFade();
+    }
+  };
+  state.bgmFadeRaf = requestAnimationFrame(step);
+}
+
+function syncBgmControls() {
+  applyBgmMix();
   const slider = $("#bgmVolume");
   if (slider) slider.value = String(Math.round(state.bgmVolume * 100));
   const btn = $("#bgmMuteBtn");
@@ -89,9 +187,10 @@ function syncBgmControls() {
 
 function startBgm() {
   if (state.bgmMuted || state.bgmVolume <= 0) return;
-  const audio = ensureBgmAudio();
+  ensureBgmAudio();
+  if (state.bgmAltActive || state.bgmAltMix > 0) ensureBgmAltAudio();
   syncBgmControls();
-  audio.play().catch(() => {});
+  playBgmForMix();
 }
 
 function setBgmMuted(muted) {
@@ -104,6 +203,7 @@ function setBgmMuted(muted) {
   syncBgmControls();
   if (muted) {
     state.bgmAudio?.pause();
+    state.bgmAltAudio?.pause();
   } else {
     startBgm();
   }
@@ -150,7 +250,10 @@ function stopGameOverReplay() {
 }
 
 function show(screenId) {
-  if (screenId !== "gameover") stopGameOverReplay();
+  if (screenId !== "gameover") {
+    stopGameOverReplay();
+    setBgmAltActive(false);
+  }
   $$(".screen").forEach((s) => s.classList.add("hidden"));
   $(`#${screenId}`).classList.remove("hidden");
   syncRunHudVisibility();
@@ -910,6 +1013,7 @@ function populateGameOver(r, battleMsg) {
       subEl.textContent = "";
     }
   }
+  setBgmAltActive(ultimate);
   recordEl.textContent = `record: ${wins}–${losses}`;
   $("#goWins").textContent = wins;
 
@@ -1045,6 +1149,15 @@ function firstFreeSlot(member, itemSlot) {
   }
   return null;
 }
+function canSwapTeamItem(data, target, targetSlot) {
+  if (!data || data.type !== "team_item") return false;
+  if (data.team === target && data.slot === targetSlot) return false;
+  if (!slotAccepts(targetSlot, data.itemSlot)) return false;
+  const member = state.run.build.team[target];
+  const targetItemId = member?.[targetSlot];
+  const targetItem = itemDef(targetItemId);
+  return !!targetItem && slotAccepts(data.slot, itemSocketId(targetItem.slot));
+}
 function renderItemSockets(teamIdx, member) {
   const sockets = document.createElement("div");
   sockets.className = "item-sockets";
@@ -1165,9 +1278,11 @@ function onItemSocketDragOver(e) {
   const target = parseInt(e.currentTarget.dataset.teamIdx, 10);
   const member = state.run.build.team[target];
   if (!member) return;
+  if (data.type === "team_item" && data.team === target && data.slot === targetSlot) return;
   const filled = e.currentTarget.classList.contains("filled");
   const destOk =
     (slotAccepts(targetSlot, data.itemSlot) && !filled) ||
+    canSwapTeamItem(data, target, targetSlot) ||
     firstFreeSlot(member, data.itemSlot);
   if (!destOk) return;
   e.preventDefault();
@@ -1185,10 +1300,16 @@ function onItemSocketDrop(e) {
 
   const member = state.run.build.team[target];
   if (!member) return;
+  if (data.type === "team_item" && data.team === target && data.slot === targetSlot) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
 
   const filled = e.currentTarget.classList.contains("filled");
+  const canSwap = canSwapTeamItem(data, target, targetSlot);
   let destSlot =
-    slotAccepts(targetSlot, data.itemSlot) && !filled
+    (slotAccepts(targetSlot, data.itemSlot) && (!filled || canSwap))
       ? targetSlot
       : firstFreeSlot(member, data.itemSlot);
 

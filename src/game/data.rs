@@ -275,10 +275,10 @@ fn build_item_defs() -> Vec<ItemDef> {
             cost: 70,
             slot: GearSlot::Hat,
             properties: vec![Property::StatsOnKill {
-                might: 5,
-                reflexes: 5,
-                wisdom: 5,
-                hp: 5,
+                might: 3,
+                reflexes: 3,
+                wisdom: 3,
+                hp: 3,
             }],
         },
         ItemDef {
@@ -351,10 +351,10 @@ fn build_item_defs() -> Vec<ItemDef> {
             cost: 80,
             slot: GearSlot::Hand,
             properties: vec![Property::StatsOnKill {
-                might: 5,
-                reflexes: 5,
-                wisdom: 5,
-                hp: 5,
+                might: 3,
+                reflexes: 3,
+                wisdom: 3,
+                hp: 3,
             }],
         },
         ItemDef {

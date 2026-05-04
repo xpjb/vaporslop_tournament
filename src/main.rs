@@ -616,10 +616,19 @@ async fn handle_run_action(
             if !slot_accepts(to_slot, item_slot) {
                 return Err("wrong item socket".into());
             }
-            if member_item_slot(&run.build.team[to_team], to_slot).is_some() {
-                return Err("item socket taken".into());
+            if from_team == to_team && from_slot == to_slot {
+                return Ok(None);
             }
-            *member_item_slot_mut(&mut run.build.team[from_team], from_slot) = None;
+            let swapped_item_id = member_item_slot(&run.build.team[to_team], to_slot)
+                .as_ref()
+                .cloned();
+            if let Some(swapped_item_id) = swapped_item_id.as_ref() {
+                let swapped_slot = item_def(swapped_item_id).ok_or("unknown item")?.slot;
+                if !slot_accepts(from_slot, swapped_slot) {
+                    return Err("wrong item socket".into());
+                }
+            }
+            *member_item_slot_mut(&mut run.build.team[from_team], from_slot) = swapped_item_id;
             *member_item_slot_mut(&mut run.build.team[to_team], to_slot) = Some(item_id);
             Ok(None)
         }

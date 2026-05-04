@@ -28,7 +28,7 @@
         </div>
       </div>
       <div class="header-right">
-        <div id="navControls" aria-label="connection, audio, and leaderboard">
+        <div id="navControls" aria-label="connection, audio, site stats, and leaderboard">
           <div class="nav-controls-row">
             <div class="bgm-control">
               <button id="bgmMuteBtn" class="bgm-mute" type="button" aria-pressed="false" aria-label="mute background music">🔊</button>
@@ -36,7 +36,13 @@
             </div>
             <div id="connectionPill" class="connection-pill connection-pill--connecting" role="status" aria-live="polite" aria-atomic="true">connecting</div>
           </div>
-          <button id="openLbBtn" class="lb-pill" type="button" aria-haspopup="dialog">★ leaderboard</button>
+          <div class="leaderboard-row">
+            <p id="siteStats" class="site-stats dim" aria-live="polite">
+              <span><b id="statActivePlayers">—</b> active</span>
+              <span><b id="statLoggedToday">—</b> today</span>
+            </p>
+            <button id="openLbBtn" class="lb-pill" type="button" aria-haspopup="dialog">★ leaderboard</button>
+          </div>
         </div>
       </div>
     </div>
@@ -110,12 +116,6 @@
       </div>
     </section>
   </main>
-
-  <p id="siteStats" class="site-stats site-stats--corner dim" aria-live="polite">
-    <span><b id="statActivePlayers">—</b> active</span>
-    <span class="site-stats-sep" aria-hidden="true">·</span>
-    <span><b id="statLoggedToday">—</b> logged in today</span>
-  </p>
 
   <div id="lbModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="lbModalTitle">
     <div class="modal-backdrop" data-close-lb-modal></div>

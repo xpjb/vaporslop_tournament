@@ -241,31 +241,21 @@ header h1 {
   min-width: 0;
 }
 .site-stats {
-  margin: 0.35rem 0 0;
-  font-size: clamp(0.9rem, 2.3vw, 1.12rem);
-  line-height: 1.35;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin: 0;
+  font-size: clamp(0.78rem, 1.9vw, 0.92rem);
+  line-height: 1.15;
   letter-spacing: 0.1em;
+  text-align: right;
   text-transform: lowercase;
+  white-space: nowrap;
 }
 .site-stats b {
   color: var(--neon-yellow);
   font-weight: 700;
   text-shadow: 0 0 8px rgba(255, 243, 108, 0.45);
-}
-.site-stats-sep {
-  margin: 0 0.4rem;
-  opacity: 0.55;
-}
-.site-stats--corner {
-  position: fixed;
-  left: 1rem;
-  bottom: 0.85rem;
-  z-index: 28;
-  margin: 0;
-  padding: 0.35rem 0.65rem;
-  border: 1px solid rgba(74, 242, 255, 0.45);
-  background: rgba(12, 0, 32, 0.82);
-  box-shadow: 0 0 12px rgba(74, 242, 255, 0.24), inset 0 0 10px rgba(255, 92, 242, 0.12);
 }
 .header-right {
   display: contents;
@@ -282,9 +272,24 @@ header h1 {
   flex-wrap: wrap;
 }
 #navControls .lb-pill {
-  grid-area: leaderboard;
   align-self: stretch;
   text-align: center;
+  width: 100%;
+}
+.leaderboard-row {
+  grid-area: leaderboard;
+  justify-self: stretch;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+.leaderboard-row .site-stats {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 0.75rem);
+  transform: translateY(-50%);
 }
 .connection-pill {
   min-width: 6.8rem;
@@ -432,7 +437,7 @@ header h1 {
   .title-stack h1,
   .profile-actions,
   .nav-controls-row,
-  #navControls .lb-pill {
+  .leaderboard-row {
     grid-area: auto;
   }
   .header-right {
@@ -447,11 +452,8 @@ header h1 {
     text-align: left;
   }
   .site-stats {
-    text-align: left;
-  }
-  .site-stats--corner {
-    max-width: calc(100vw - 2rem);
-    font-size: 0.88rem;
+    align-items: flex-end;
+    text-align: right;
   }
   #navControls {
     display: flex;
@@ -462,6 +464,15 @@ header h1 {
   .nav-controls-row {
     justify-content: center;
   }
+  .leaderboard-row {
+    justify-content: flex-end;
+    width: 100%;
+    gap: 0.75rem;
+  }
+  .leaderboard-row .site-stats {
+    position: static;
+    transform: none;
+  }
   #status {
     margin-left: 0;
     text-align: center;
@@ -470,6 +481,7 @@ header h1 {
   }
 }
 .dim { color: var(--neon-cyan); opacity: 0.7; font-size: 0.7em; }
+.site-stats.dim { font-size: clamp(0.78rem, 1.9vw, 0.92rem); }
 
 main { padding: 2rem; max-width: 1100px; margin: 0 auto; }
 .screen { animation: fadein .25s ease; }

@@ -4,7 +4,45 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>VAPORSLOP // T O U R N A M E N T</title>
+<link rel="icon" href="/assets/orang.webp" type="image/webp" />
 <link rel="stylesheet" href="./style.css" />
+<script>
+  // TEMPORARY MIGRATION (2026-05-06 → remove after ~2026-05-13): one-time redirect
+  // from the old oortic.net/vaporslop home to tourney.lol, carrying the player's
+  // UUID across origins via ?uuid=. The old origin sends the user here; this page
+  // adopts the incoming UUID into localStorage (backing up any pre-existing one).
+  (function () {
+    try {
+      var KEY = "playerUuid";
+      var OLD_HOST = "oortic.net";
+      var NEW_ORIGIN = "https://tourney.lol";
+
+      // On the legacy domain: forward to the new origin with the local UUID attached.
+      if (location.hostname === OLD_HOST || location.hostname.endsWith("." + OLD_HOST)) {
+        var existing = "";
+        try { existing = localStorage.getItem(KEY) || ""; } catch (_) {}
+        var target = NEW_ORIGIN + "/" + (existing ? "?uuid=" + encodeURIComponent(existing) : "");
+        location.replace(target);
+        return;
+      }
+
+      // On the new domain: if a ?uuid= came in, adopt it (preserving any prior id as *_old).
+      var params = new URLSearchParams(location.search);
+      var incoming = params.get("uuid");
+      if (incoming) {
+        try {
+          var prior = localStorage.getItem(KEY);
+          if (prior && prior !== incoming) localStorage.setItem(KEY + "_old", prior);
+          localStorage.setItem(KEY, incoming);
+        } catch (_) {}
+        params.delete("uuid");
+        var qs = params.toString();
+        var clean = location.pathname + (qs ? "?" + qs : "") + location.hash;
+        history.replaceState(null, "", clean);
+      }
+    } catch (_) {}
+  })();
+</script>
 </head>
 <body>
   <div id="bg"></div>

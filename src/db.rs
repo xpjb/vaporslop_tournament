@@ -118,6 +118,7 @@ impl Db {
                 ultimate_victories INTEGER NOT NULL DEFAULT 0
             );",
         )?;
+        recompute_cost_values(&conn)?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -280,7 +281,7 @@ impl Db {
     }
 
     /// Find another player's build whose cost is near the requested gold budget. No bot rows exist in the DB.
-    /// Allowed opponent cost: up to 5% above `target_cost`, or up to 15% below (ceiled, at least 1 gold slack each side).
+    /// Allowed opponent cost: equal to or up to 15% below `target_cost` (ceiled, at least 1 gold of slack).
     pub fn find_opponent(
         &self,
         current_run_id: &str,
@@ -289,9 +290,8 @@ impl Db {
     ) -> Result<Option<(String, String, String, Build, i32)>> {
         let conn = self.conn.lock();
         let down = ((target_cost as f32) * 0.15).ceil().max(1.0) as i32;
-        let up = ((target_cost as f32) * 0.05).ceil().max(1.0) as i32;
-        let min_cost = (target_cost - down).max(0);
-        let max_cost = target_cost + up;
+        let min_cost = (target_cost - down).max(1);
+        let max_cost = target_cost;
         let mut stmt = conn.prepare(
             "SELECT id,player_id,name,build_json,mmr FROM runs
              WHERE id != ?1
@@ -312,9 +312,7 @@ impl Db {
             let bjson: String = row.get(3)?;
             let mmr: i32 = row.get(4)?;
             let build: Build = serde_json::from_str(&bjson)?;
-            if !build.team.is_empty() {
-                candidates.push((id, player_id, name, build, mmr));
-            }
+            candidates.push((id, player_id, name, build, mmr));
         }
         let mut rng = rand::thread_rng();
         if let Some(candidate) = candidates.choose(&mut rng).cloned() {
@@ -517,6 +515,67 @@ fn record_profile_progress_on(
             if completed_ultimate_victory { 1 } else { 0 },
         ],
     )?;
+    Ok(())
+}
+
+/// Cull empty-team rows and recompute every run's cached cost_value against current item/character defs.
+/// Run once at startup so price changes in code propagate to the matchmaking index.
+fn recompute_cost_values(conn: &Connection) -> Result<()> {
+    let before_total: i64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+    let before_empty: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM runs WHERE cost_value = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    tracing::info!(
+        "recompute_cost_values: starting; rows={} empty_rows={}",
+        before_total,
+        before_empty,
+    );
+    let culled = conn.execute("DELETE FROM runs WHERE cost_value = 0", [])?;
+
+    let mut updated: usize = 0;
+    let mut skipped: usize = 0;
+    let mut select = conn.prepare("SELECT id, build_json, cost_value FROM runs")?;
+    let mut rows = select.query([])?;
+    let mut updates: Vec<(String, i32, i32)> = vec![];
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let bjson: String = row.get(1)?;
+        let old_cost: i32 = row.get(2)?;
+        match serde_json::from_str::<Build>(&bjson) {
+            Ok(build) => {
+                let new_cost = build.cost_value();
+                if new_cost != old_cost {
+                    updates.push((id, old_cost, new_cost));
+                }
+            }
+            Err(e) => {
+                skipped += 1;
+                tracing::warn!("recompute_cost_values: skip run {} ({})", id, e);
+            }
+        }
+    }
+    drop(rows);
+    drop(select);
+
+    let mut update = conn.prepare("UPDATE runs SET cost_value = ?1 WHERE id = ?2")?;
+    for (id, old_cost, new_cost) in &updates {
+        update.execute(params![new_cost, id])?;
+        tracing::debug!(
+            "recompute_cost_values: run {} {} -> {}",
+            id,
+            old_cost,
+            new_cost
+        );
+        updated += 1;
+    }
+    tracing::info!(
+        "recompute_cost_values: done; culled_empty={} updated={} skipped={}",
+        culled,
+        updated,
+        skipped,
+    );
     Ok(())
 }
 

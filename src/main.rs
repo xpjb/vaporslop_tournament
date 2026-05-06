@@ -346,6 +346,9 @@ async fn send(socket: &mut WebSocket, msg: &ServerMsg) {
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut registered_player: Option<String> = None;
     let mut current_run_id: Option<String> = None;
+    // A freshly-started run with an empty team isn't persisted until the player makes a move
+    // that gives it real content. Held here so subsequent messages can find it before its first DB write.
+    let mut pending_run: Option<Run> = None;
     let mut rx = state.stats_tx.subscribe();
 
     send(
@@ -440,19 +443,9 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             shop: roll_shop(),
                             phase: Phase::Shop,
                         };
-                        let cost = run.build.cost_value();
-                        if let Err(e) = state.db.upsert_run(&run, cost) {
-                            send(
-                                &mut socket,
-                                &ServerMsg::Error {
-                                    message: e.to_string(),
-                                },
-                            )
-                            .await;
-                            continue;
-                        }
                         register_socket_player(&state, &mut registered_player, &run.player_id);
                         current_run_id = Some(run.id.clone());
+                        pending_run = Some(run.clone());
                         send(&mut socket, &ServerMsg::State { run, profile }).await;
                     }
                     ClientMsg::Resume { player_id } => {
@@ -540,10 +533,30 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         };
                         send(&mut socket, &ServerMsg::Profile { profile: profile.clone() }).await;
                         if let Some(id) = current_run_id.clone() {
-                            if let Ok(Some(mut run)) = state.db.load_run(&id) {
+                            let loaded = match state.db.load_run(&id) {
+                                Ok(Some(r)) => Some(r),
+                                _ => pending_run.as_ref().filter(|r| r.id == id).cloned(),
+                            };
+                            if let Some(mut run) = loaded {
                                 run.name = profile.name.clone();
-                                let cost = run.build.cost_value();
-                                if state.db.upsert_run(&run, cost).is_ok() {
+                                if !run.build.team.is_empty() {
+                                    tracing::debug!(
+                                        "cost_value: computing for run {} (profile rename, team_size={})",
+                                        run.id,
+                                        run.build.team.len()
+                                    );
+                                    let cost = run.build.cost_value();
+                                    tracing::debug!(
+                                        "cost_value: run {} computed cost={}",
+                                        run.id,
+                                        cost
+                                    );
+                                    if state.db.upsert_run(&run, cost).is_ok() {
+                                        pending_run = None;
+                                        send(&mut socket, &ServerMsg::State { run, profile }).await;
+                                    }
+                                } else {
+                                    pending_run = Some(run.clone());
                                     send(&mut socket, &ServerMsg::State { run, profile }).await;
                                 }
                             }
@@ -565,23 +578,40 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         };
                         let mut run = match state.db.load_run(&id) {
                             Ok(Some(r)) => r,
-                            _ => {
-                                send(
-                                    &mut socket,
-                                    &ServerMsg::Error {
-                                        message: "run gone".into(),
-                                    },
-                                )
-                                .await;
-                                continue;
-                            }
+                            _ => match pending_run.as_ref().filter(|r| r.id == id).cloned() {
+                                Some(r) => r,
+                                None => {
+                                    send(
+                                        &mut socket,
+                                        &ServerMsg::Error {
+                                            message: "run gone".into(),
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            },
                         };
                         let is_battle = matches!(&other, ClientMsg::Battle);
                         let result = handle_run_action(&state, &mut run, other).await;
                         match result {
                             Ok(extra) => {
+                                tracing::debug!(
+                                    "cost_value: computing for run {} (action result, team_size={})",
+                                    run.id,
+                                    run.build.team.len()
+                                );
                                 let cost = run.build.cost_value();
-                                let save_result = if is_battle {
+                                tracing::debug!(
+                                    "cost_value: run {} computed cost={}",
+                                    run.id,
+                                    cost
+                                );
+                                let save_result = if run.build.team.is_empty() && !is_battle {
+                                    // Don't persist a still-empty team; hold the run in memory until it has content.
+                                    pending_run = Some(run.clone());
+                                    Ok(())
+                                } else if is_battle {
                                     let update_mmr = matches!(
                                         &extra,
                                         Some(ServerMsg::Battle {
@@ -609,6 +639,9 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     )
                                     .await;
                                     continue;
+                                }
+                                if !run.build.team.is_empty() {
+                                    pending_run = None;
                                 }
                                 if is_battle {
                                     if let Ok(profile) = state.db.ensure_player_profile(&run.player_id, &run.name) {

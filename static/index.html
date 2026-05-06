@@ -94,10 +94,12 @@
       <div>losses: <b id="hudLosses">0</b>/<span id="hudMaxLosses">3</span></div>
     </div>
 
-    <section id="start" class="screen">
+    <section id="start" class="screen start-screen">
       <h2>enter the arcade</h2>
       <p class="hint">set your handle and avatar from the profile panel.</p>
-      <button id="newRunBtn">new run</button>
+      <div class="row gameover-controls">
+        <button id="newRunBtn" class="primary">new run</button>
+      </div>
     </section>
 
     <section id="shop" class="screen hidden">
@@ -121,10 +123,10 @@
       </div>
 
       <div class="row controls">
+        <button id="quitRunBtn" class="quit-run-button" type="button">quit run</button>
         <button id="rerollBtn">reroll ($<span id="rerollCost">10</span>)</button>
         <button id="battleBtn" class="primary">battle ▶</button>
       </div>
-      <button id="quitRunBtn" class="quit-run-button" type="button">quit run</button>
     </section>
 
     <section id="battle" class="screen hidden">
@@ -133,7 +135,8 @@
       </div>
       <canvas id="battleCanvas" width="900" height="320"></canvas>
       <div id="battleLog"></div>
-      <div class="row">
+      <div class="row battle-controls">
+        <button id="replayBattleBtn" class="hidden" type="button">↻ replay</button>
         <button id="nextRoundBtn" class="primary hidden">continue</button>
       </div>
     </section>
@@ -149,8 +152,9 @@
         </div>
         <canvas id="goReplayCanvas" width="900" height="320"></canvas>
       </div>
-      <div class="row">
-        <button id="goRestart">new run</button>
+      <div class="row gameover-controls">
+        <button id="goReplayBtn" class="hidden" type="button">↻ replay</button>
+        <button id="goRestart" class="primary">new run</button>
       </div>
     </section>
   </main>

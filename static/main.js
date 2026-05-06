@@ -532,6 +532,7 @@ function handleServer(msg) {
         unknownMmr: msg.opponent_mmr_before == null,
       });
       $("#nextRoundBtn").classList.add("hidden");
+      $("#replayBattleBtn").classList.add("hidden");
       $("#battleLog").innerHTML = "";
       state.battleAnimating = true;
       playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
@@ -551,6 +552,7 @@ function handleServer(msg) {
         }
         if (state.run?.phase !== "game_over") {
           $("#nextRoundBtn").classList.remove("hidden");
+          $("#replayBattleBtn").classList.remove("hidden");
         } else {
           renderRun();
         }
@@ -1168,8 +1170,10 @@ function populateGameOver(r, battleMsg) {
   $("#goWins").textContent = wins;
 
   const wrap = $("#goReplayWrap");
+  const replayBtn = $("#goReplayBtn");
   if (battleMsg && battleMsg.events && battleMsg.events.length) {
     wrap.classList.remove("hidden");
+    replayBtn?.classList.remove("hidden");
     renderIdentity($("#goLeftName"), r.name ?? "you", battleMsg.player_mmr_before, battleMsg.player_avatar || state.profile.selected_avatar);
     renderIdentity($("#goRightName"), battleMsg.opponent_name, battleMsg.opponent_mmr_before, battleMsg.opponent_avatar || DEFAULT_AVATAR_ID, {
       unknownMmr: battleMsg.opponent_mmr_before == null,
@@ -1185,6 +1189,7 @@ function populateGameOver(r, battleMsg) {
     }
   } else {
     wrap.classList.add("hidden");
+    replayBtn?.classList.add("hidden");
     state.gameOverReplayKey = null;
   }
 }
@@ -1707,6 +1712,37 @@ window.addEventListener("keydown", (e) => {
   }
 });
 $("#nextRoundBtn").onclick = () => renderRun();
+$("#replayBattleBtn").onclick = () => {
+  if (!state.lastBattle || state.battleAnimating) return;
+  $("#battleCanvas").__battleTooltipCleanup?.();
+  $("#battleLog").innerHTML = "";
+  state.battleAnimating = true;
+  $("#nextRoundBtn").classList.add("hidden");
+  $("#replayBattleBtn").classList.add("hidden");
+  const msg = state.lastBattle;
+  playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
+    state.battleAnimating = false;
+    if (state.run?.phase !== "game_over") {
+      $("#nextRoundBtn").classList.remove("hidden");
+      $("#replayBattleBtn").classList.remove("hidden");
+    }
+  }, {
+    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
+    hideTooltip,
+  });
+};
+$("#goReplayBtn").onclick = () => {
+  if (!state.lastBattle) return;
+  stopGameOverReplay();
+  const r = state.run;
+  if (!r) return;
+  state.gameOverReplayKey = `${r.id}:${state.lastBattle.events.length}`;
+  playBattle($("#goReplayCanvas"), state.lastBattle, charDef, itemDef, () => {}, {
+    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
+    hideTooltip,
+    loop: true,
+  });
+};
 $("#goRestart").onclick = () => {
   state.run = null;
   state.lastBattle = null;

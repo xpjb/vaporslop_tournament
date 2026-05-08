@@ -36,6 +36,7 @@ const state = {
   lastBattle: null,
   battleAnimating: false,
   autoResumePending: false,
+  evicted: false, // server told us another tab took over; stay disconnected
   playerId: getOrCreatePlayerId(),
   nickname: localStorage.getItem(NICKNAME_KEY) || "anon",
   auth: {
@@ -661,6 +662,37 @@ function syncRunHudValues() {
   $("#hudMmr").textContent = r.mmr ?? "????";
 }
 
+function showSessionReplacedBanner() {
+  if (document.getElementById("sessionReplacedBanner")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "sessionReplacedBanner";
+  overlay.style.cssText =
+    "position:fixed;inset:0;background:rgba(8,6,18,0.86);z-index:9999;" +
+    "display:flex;align-items:center;justify-content:center;font-family:inherit;color:#f4f1ff;";
+  const card = document.createElement("div");
+  card.style.cssText =
+    "max-width:24rem;padding:1.5rem 1.75rem;border-radius:0.75rem;" +
+    "background:#1d1638;border:1px solid #4a3a8a;text-align:center;line-height:1.45;";
+  const title = document.createElement("div");
+  title.style.cssText = "font-size:1.1rem;margin-bottom:0.5rem;font-weight:600;";
+  title.textContent = "this run is being played in another tab";
+  const body = document.createElement("div");
+  body.style.cssText = "font-size:0.9rem;opacity:0.85;margin-bottom:1.25rem;";
+  body.textContent =
+    "to avoid scrambling the save, only one tab can play at a time. " +
+    "reload here to take the run back.";
+  const btn = document.createElement("button");
+  btn.textContent = "reload";
+  btn.style.cssText =
+    "padding:0.55rem 1.25rem;font-size:0.95rem;border-radius:0.4rem;" +
+    "background:#6b54d6;color:#fff;border:none;cursor:pointer;";
+  btn.addEventListener("click", () => location.reload());
+  card.append(title, body, btn);
+  overlay.append(card);
+  document.body.append(overlay);
+  setTimeout(() => btn.focus(), 0);
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}${BASE_PATH}/ws`);
@@ -675,6 +707,10 @@ function connect() {
   };
   ws.onclose = () => {
     if (state.ws !== ws) return;
+    if (state.evicted) {
+      setConnectionStatus("offline", "offline");
+      return;
+    }
     setConnectionStatus("reconnecting", "offline");
     setTimeout(connect, 1000);
   };
@@ -744,6 +780,12 @@ function handleServer(msg) {
           flash("please sign in to continue", { variant: "info", duration: 3000 });
         }
       });
+      break;
+    case "session_replaced":
+      state.evicted = true;
+      state.autoResumePending = false;
+      try { state.ws?.close(); } catch (_) {}
+      showSessionReplacedBanner();
       break;
     case "profile":
       applyProfile(msg.profile);

@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use db::{AttachErr, Db};
+use db::{AttachErr, BattleOutcome, Db};
 use game::combat::resolve_battle;
 use game::data::*;
 use game::shop::{ai_ladder_build, roll_shop};
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tower_http::services::ServeDir;
 
 const AUTH_RATE_LIMIT: usize = 10;
@@ -36,6 +36,10 @@ struct AppState {
     presence: Arc<Presence>,
     stats_tx: broadcast::Sender<SiteStats>,
     rate: Arc<RateLimiter>,
+    /// One slot per `player_id`. When a second WS binds to the same player, the older
+    /// holder's `Notify` is fired so it can send `session_replaced` and shut down. Stops
+    /// two tabs from interleaving writes against the same `player_state` row.
+    active_sessions: Arc<parking_lot::Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 #[derive(Default)]
@@ -82,14 +86,47 @@ fn broadcast_site_stats(state: &AppState) {
     let _ = state.stats_tx.send(site_stats_snapshot(state));
 }
 
-fn register_socket_player(state: &AppState, reg: &mut Option<String>, player_id: &str) {
+/// Bind this socket to `player_id` exactly once: bump presence, log the daily login,
+/// and claim the active-session slot (evicting any prior holder).
+fn register_socket_player(
+    state: &AppState,
+    reg: &mut Option<String>,
+    evict: &mut Option<Arc<Notify>>,
+    player_id: &str,
+) {
     if reg.is_none() {
         state.presence.join(player_id);
         if let Err(e) = state.db.touch_player_daily(player_id) {
             tracing::warn!("touch_player_daily: {e}");
         }
         *reg = Some(player_id.to_string());
+        *evict = Some(claim_session_slot(state, player_id));
         broadcast_site_stats(state);
+    }
+}
+
+/// Insert a fresh `Notify` into the active-sessions map for `player_id`. If another socket
+/// was already holding the slot, its old `Notify` is fired so it shuts itself down.
+fn claim_session_slot(state: &AppState, player_id: &str) -> Arc<Notify> {
+    let n = Arc::new(Notify::new());
+    let prev = state
+        .active_sessions
+        .lock()
+        .insert(player_id.to_string(), n.clone());
+    if let Some(prev) = prev {
+        prev.notify_one();
+    }
+    n
+}
+
+/// Remove our entry from the map *only if it's still ours*. (If we were already evicted,
+/// the entry now belongs to the new owner; leave it alone.)
+fn release_session_slot(state: &AppState, player_id: &str, my_notify: &Arc<Notify>) {
+    let mut g = state.active_sessions.lock();
+    if let Some(current) = g.get(player_id) {
+        if Arc::ptr_eq(current, my_notify) {
+            g.remove(player_id);
+        }
     }
 }
 
@@ -199,6 +236,9 @@ enum ServerMsg {
         message: String,
     },
     AuthRequired,
+    /// Another socket has taken over this player's slot. Client should stop sending and
+    /// surface a "this run is being played in another tab" notice.
+    SessionReplaced,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
         presence: Arc::new(Presence::default()),
         stats_tx,
         rate: RateLimiter::new(),
+        active_sessions: Arc::new(parking_lot::Mutex::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -391,10 +432,7 @@ fn resolve_player_id(
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid: Option<String>) {
     let mut registered_player: Option<String> = None;
-    let mut current_run_id: Option<String> = None;
-    // A freshly-started run with an empty team isn't persisted until the player makes a move
-    // that gives it real content. Held here so subsequent messages can find it before its first DB write.
-    let mut pending_run: Option<Run> = None;
+    let mut evict_notify: Option<Arc<Notify>> = None;
     let mut rx = state.stats_tx.subscribe();
 
     send(
@@ -418,7 +456,27 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
     .await;
 
     loop {
+        // Per-iteration future that resolves when this socket's slot is evicted by a newer
+        // socket binding to the same player_id. Cloned each loop so it doesn't borrow
+        // `evict_notify` (other arms below need to mutate it). An unawaited Notified does
+        // not consume the permit, so a notification fired during another arm's iteration
+        // is picked up on the next loop.
+        let evict_handle = evict_notify.clone();
+        let evict_fut = async move {
+            if let Some(n) = evict_handle {
+                n.notified().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(evict_fut);
+
         tokio::select! {
+            biased;
+            _ = &mut evict_fut => {
+                send(&mut socket, &ServerMsg::SessionReplaced).await;
+                break;
+            }
             recv_msg = socket.recv() => {
                 let Some(result) = recv_msg else { break };
                 let msg = match result {
@@ -495,9 +553,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                             shop: roll_shop(),
                             phase: Phase::Shop,
                         };
-                        register_socket_player(&state, &mut registered_player, &run.player_id);
-                        current_run_id = Some(run.id.clone());
-                        pending_run = Some(run.clone());
+                        register_socket_player(&state, &mut registered_player, &mut evict_notify, &run.player_id);
+                        if let Err(e) = state.db.upsert_player_state(&run) {
+                            send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await;
+                            continue;
+                        }
                         send(&mut socket, &ServerMsg::State { run, profile }).await;
                     }
                     ClientMsg::Resume { player_id } => {
@@ -508,8 +568,8 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                 continue;
                             }
                         };
-                        register_socket_player(&state, &mut registered_player, &player_id);
-                        match state.db.load_latest_run_for_player(&player_id) {
+                        register_socket_player(&state, &mut registered_player, &mut evict_notify, &player_id);
+                        match state.db.load_player_state(&player_id) {
                             Ok(Some(run)) => {
                                 let mut profile = match state.db.ensure_player_profile(&player_id, &run.name) {
                                     Ok(profile) => sanitize_stored_profile(profile),
@@ -534,7 +594,6 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                     };
                                 }
                                 send(&mut socket, &ServerMsg::Profile { profile: profile.clone() }).await;
-                                current_run_id = Some(run.id.clone());
                                 send(&mut socket, &ServerMsg::State { run, profile }).await;
                             }
                             Ok(None) => {
@@ -579,7 +638,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                 continue;
                             }
                         };
-                        register_socket_player(&state, &mut registered_player, &player_id);
+                        register_socket_player(&state, &mut registered_player, &mut evict_notify, &player_id);
                         let current_profile = match state.db.ensure_player_profile(&player_id, &name) {
                             Ok(profile) => sanitize_stored_profile(profile),
                             Err(e) => {
@@ -596,39 +655,15 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                             }
                         };
                         send(&mut socket, &ServerMsg::Profile { profile: profile.clone() }).await;
-                        if let Some(id) = current_run_id.clone() {
-                            let loaded = match state.db.load_run(&id) {
-                                Ok(Some(r)) => Some(r),
-                                _ => pending_run.as_ref().filter(|r| r.id == id).cloned(),
-                            };
-                            if let Some(mut run) = loaded {
-                                run.name = profile.name.clone();
-                                if !run.build.team.is_empty() {
-                                    tracing::debug!(
-                                        "cost_value: computing for run {} (profile rename, team_size={})",
-                                        run.id,
-                                        run.build.team.len()
-                                    );
-                                    let cost = run.build.cost_value();
-                                    tracing::debug!(
-                                        "cost_value: run {} computed cost={}",
-                                        run.id,
-                                        cost
-                                    );
-                                    if state.db.upsert_run(&run, cost).is_ok() {
-                                        pending_run = None;
-                                        send(&mut socket, &ServerMsg::State { run, profile }).await;
-                                    }
-                                } else {
-                                    pending_run = Some(run.clone());
-                                    send(&mut socket, &ServerMsg::State { run, profile }).await;
-                                }
-                            }
+                        // `update_player_profile` already renamed the player_state row in SQL;
+                        // reload to pick up the new name and echo State back to the client.
+                        if let Ok(Some(run)) = state.db.load_player_state(&player_id) {
+                            send(&mut socket, &ServerMsg::State { run, profile }).await;
                         }
                     }
                     other => {
-                        let id = match &current_run_id {
-                            Some(i) => i.clone(),
+                        let player_id = match &registered_player {
+                            Some(p) => p.clone(),
                             None => {
                                 send(
                                     &mut socket,
@@ -640,59 +675,45 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                 continue;
                             }
                         };
-                        let mut run = match state.db.load_run(&id) {
+                        let mut run = match state.db.load_player_state(&player_id) {
                             Ok(Some(r)) => r,
-                            _ => match pending_run.as_ref().filter(|r| r.id == id).cloned() {
-                                Some(r) => r,
-                                None => {
-                                    send(
-                                        &mut socket,
-                                        &ServerMsg::Error {
-                                            message: "run gone".into(),
-                                        },
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            },
+                            Ok(None) => {
+                                send(
+                                    &mut socket,
+                                    &ServerMsg::Error {
+                                        message: "run gone".into(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                            Err(e) => {
+                                send(&mut socket, &ServerMsg::Error { message: e.to_string() }).await;
+                                continue;
+                            }
                         };
                         let is_battle = matches!(&other, ClientMsg::Battle);
                         let result = handle_run_action(&state, &mut run, other).await;
                         match result {
                             Ok(extra) => {
-                                tracing::debug!(
-                                    "cost_value: computing for run {} (action result, team_size={})",
-                                    run.id,
-                                    run.build.team.len()
-                                );
-                                let cost = run.build.cost_value();
-                                tracing::debug!(
-                                    "cost_value: run {} computed cost={}",
-                                    run.id,
-                                    cost
-                                );
-                                let save_result = if run.build.team.is_empty() && !is_battle {
-                                    // Don't persist a still-empty team; hold the run in memory until it has content.
-                                    pending_run = Some(run.clone());
-                                    Ok(())
-                                } else if is_battle {
-                                    let update_mmr = matches!(
-                                        &extra,
-                                        Some(ServerMsg::Battle {
-                                            opponent_mmr_before: Some(_),
-                                            ..
-                                        })
-                                    );
+                                let save_result = if is_battle {
+                                    let (update_mmr, outcome) = match &extra {
+                                        Some(ServerMsg::Battle { winner, opponent_mmr_before, .. }) => (
+                                            opponent_mmr_before.is_some(),
+                                            battle_outcome(*winner),
+                                        ),
+                                        _ => (false, BattleOutcome::Draw),
+                                    };
                                     let completed_ultimate_victory =
                                         run.phase == Phase::GameOver && run.wins >= MAX_WINS;
-                                    state.db.record_score_and_upsert_run(
+                                    state.db.record_battle_and_save_state(
                                         &run,
-                                        cost,
+                                        outcome,
                                         update_mmr,
                                         completed_ultimate_victory,
                                     )
                                 } else {
-                                    state.db.upsert_run(&run, cost)
+                                    state.db.upsert_player_state(&run)
                                 };
                                 if let Err(e) = save_result {
                                     send(
@@ -703,9 +724,6 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                     )
                                     .await;
                                     continue;
-                                }
-                                if !run.build.team.is_empty() {
-                                    pending_run = None;
                                 }
                                 if is_battle {
                                     if let Ok(profile) = state.db.ensure_player_profile(&run.player_id, &run.name) {
@@ -762,6 +780,9 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
     }
 
     if let Some(pid) = registered_player.take() {
+        if let Some(notify) = evict_notify.as_ref() {
+            release_session_slot(&state, &pid, notify);
+        }
         state.presence.leave(&pid);
         broadcast_site_stats(&state);
     }
@@ -974,7 +995,7 @@ async fn handle_run_action(
             let target_gold = total_earned_gold(run);
             let opponent = state
                 .db
-                .find_opponent(&run.id, &run.player_id, target_gold)
+                .find_opponent(&run.player_id, target_gold)
                 .map_err(|e| e.to_string())?;
             let player_avatar = state
                 .db
@@ -1123,6 +1144,14 @@ fn battle_score(winner: Option<u8>) -> f64 {
         Some(0) => 1.0,
         Some(1) => 0.0,
         _ => 0.5,
+    }
+}
+
+fn battle_outcome(winner: Option<u8>) -> BattleOutcome {
+    match winner {
+        Some(0) => BattleOutcome::Win,
+        Some(1) => BattleOutcome::Loss,
+        _ => BattleOutcome::Draw,
     }
 }
 

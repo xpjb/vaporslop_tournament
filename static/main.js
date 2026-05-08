@@ -38,6 +38,14 @@ const state = {
   autoResumePending: false,
   playerId: getOrCreatePlayerId(),
   nickname: localStorage.getItem(NICKNAME_KEY) || "anon",
+  auth: {
+    username: null,
+    displayName: null,
+    avatar: null,
+    hasAccount: false,
+    signedIn: false,
+    edgeCase: false, // registered uuid on this device, no active session
+  },
   bgmAudio: null,
   bgmAltAudio: null,
   bgmVolume: getStoredBgmVolume(),
@@ -68,6 +76,236 @@ function getOrCreatePlayerId() {
   id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   localStorage.setItem(PLAYER_ID_KEY, id);
   return id;
+}
+
+const AUTH_ERROR_TEXT = {
+  username_taken: "that username is taken",
+  username_invalid: "username must be 3–24 chars (letters, numbers, _ or -)",
+  password_too_short: "password must be at least 6 characters",
+  invalid_credentials: "wrong username or password",
+  rate_limited: "too many attempts — try again in a minute",
+  already_registered: "this account is already registered",
+  player_id_required: "missing player id",
+  server_error: "server error — please try again",
+};
+
+function authErrText(code) {
+  return AUTH_ERROR_TEXT[code] || code || "something went wrong";
+}
+
+async function fetchWhoami() {
+  try {
+    const url = `/api/whoami?player_id=${encodeURIComponent(state.playerId || "")}`;
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function applyWhoami(w) {
+  if (!w) {
+    state.auth = { username: null, displayName: null, avatar: null, hasAccount: false, signedIn: false, edgeCase: false };
+    return;
+  }
+  if (w.player_id && w.player_id !== state.playerId) {
+    state.playerId = w.player_id;
+    localStorage.setItem(PLAYER_ID_KEY, w.player_id);
+    state.profile.player_id = w.player_id;
+  }
+  state.auth = {
+    username: w.username || null,
+    displayName: w.display_name || null,
+    avatar: w.avatar || null,
+    hasAccount: !!w.has_account,
+    signedIn: !!w.signed_in,
+    edgeCase: !!w.has_account && !w.signed_in,
+  };
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  let data = null;
+  try { data = await res.json(); } catch { /* may be empty */ }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function registerAccount({ username, password }) {
+  return postJson("/api/register", { player_id: state.playerId, username, password });
+}
+
+async function loginAccount({ username, password, stay }) {
+  return postJson("/api/login", { username, password, stay: !!stay });
+}
+
+async function logoutAccount() {
+  return postJson("/api/logout", {});
+}
+
+function reconnectWs() {
+  // Drop the current socket so the next upgrade reads the latest cookie state.
+  if (state.ws) {
+    try { state.ws.close(); } catch { /* noop */ }
+    state.ws = null;
+  }
+  connect();
+}
+
+function showLoginScreen() {
+  $("#loginError").textContent = "";
+  $("#loginUsername").value = "";
+  $("#loginPassword").value = "";
+  $("#loginStay").checked = false;
+  show("login");
+  setTimeout(() => $("#loginUsername")?.focus(), 0);
+}
+
+function renderStartScreen() {
+  const normal = $("#startNormal");
+  const edge = $("#startEdgeCase");
+  if (!normal || !edge) return;
+  if (state.auth.edgeCase) {
+    normal.classList.add("hidden");
+    edge.classList.remove("hidden");
+    const avatarId = state.auth.avatar || DEFAULT_AVATAR_ID;
+    const avatar = profileAvatarDef(avatarId);
+    const img = $("#edgeCaseAvatar");
+    if (img) {
+      img.src = assetHref(avatar.sprite);
+      img.alt = avatar.name;
+    }
+    $("#edgeCaseName").textContent = state.auth.displayName || "anon";
+    $("#edgeCaseUsername").textContent = state.auth.username ? `@${state.auth.username}` : "";
+    $("#edgeCaseError").textContent = "";
+    $("#edgeCasePassword").value = "";
+    $("#edgeCaseStay").checked = false;
+  } else {
+    normal.classList.remove("hidden");
+    edge.classList.add("hidden");
+  }
+}
+
+function renderProfileAccountControls() {
+  const status = $("#profileAccountStatus");
+  const registerBtn = $("#registerBtn");
+  const logoutBtn = $("#logoutBtn");
+  const panel = $("#registerPanel");
+  if (!status || !registerBtn || !logoutBtn || !panel) return;
+  if (state.auth.signedIn && state.auth.username) {
+    status.textContent = `signed in as @${state.auth.username}`;
+    registerBtn.classList.add("hidden");
+    logoutBtn.classList.remove("hidden");
+    panel.classList.add("hidden");
+  } else if (state.auth.hasAccount) {
+    // Edge case (shouldn't normally see profile modal here, but render sensibly)
+    status.textContent = `account: @${state.auth.username || ""} — signed out`;
+    registerBtn.classList.add("hidden");
+    logoutBtn.classList.add("hidden");
+    panel.classList.add("hidden");
+  } else {
+    status.textContent = "guest — your progress is tied to this browser. register to make it durable.";
+    registerBtn.classList.remove("hidden");
+    logoutBtn.classList.add("hidden");
+  }
+}
+
+function openRegisterPanel() {
+  $("#registerError").textContent = "";
+  $("#registerUsername").value = "";
+  $("#registerPassword").value = "";
+  $("#registerPasswordConfirm").value = "";
+  $("#registerPanel").classList.remove("hidden");
+  $("#registerBtn").classList.add("hidden");
+  setTimeout(() => $("#registerUsername")?.focus(), 0);
+}
+
+function closeRegisterPanel() {
+  $("#registerPanel").classList.add("hidden");
+  if (!state.auth.hasAccount) $("#registerBtn").classList.remove("hidden");
+}
+
+async function handleRegisterSubmit(e) {
+  e.preventDefault();
+  const username = $("#registerUsername").value.trim();
+  const password = $("#registerPassword").value;
+  const confirm = $("#registerPasswordConfirm").value;
+  const errEl = $("#registerError");
+  errEl.textContent = "";
+  if (password !== confirm) {
+    errEl.textContent = "passwords don't match";
+    return;
+  }
+  if (password.length < 6) {
+    errEl.textContent = authErrText("password_too_short");
+    return;
+  }
+  const { ok, data } = await registerAccount({ username, password });
+  if (!ok) {
+    errEl.textContent = authErrText(data?.error);
+    return;
+  }
+  // Successful: cookie is set by server. Refresh whoami, close panel, reconnect WS.
+  const w = await fetchWhoami();
+  applyWhoami(w);
+  renderProfileAccountControls();
+  renderStartScreen();
+  closeRegisterPanel();
+  closeProfileModal();
+  flash(`account @${state.auth.username} registered — write your password down!`, { variant: "info", duration: 5000 });
+  reconnectWs();
+}
+
+async function handleLoginSubmit({ username, password, stay, errEl, onSuccess }) {
+  errEl.textContent = "";
+  if (!username || !password) {
+    errEl.textContent = authErrText("invalid_credentials");
+    return;
+  }
+  const { ok, data } = await loginAccount({ username, password, stay });
+  if (!ok) {
+    errEl.textContent = authErrText(data?.error);
+    return;
+  }
+  if (data?.player_id) {
+    state.playerId = data.player_id;
+    localStorage.setItem(PLAYER_ID_KEY, data.player_id);
+    state.profile.player_id = data.player_id;
+  }
+  const w = await fetchWhoami();
+  applyWhoami(w);
+  renderProfileAccountControls();
+  renderStartScreen();
+  if (typeof onSuccess === "function") onSuccess();
+  reconnectWs();
+}
+
+async function handleLogout() {
+  await logoutAccount();
+  // Logging out: keep current playerId in localStorage so we land in the edge-case
+  // flow next boot. (User stays "associated with" their account on this device.)
+  await refreshAuthAndRender();
+  reconnectWs();
+}
+
+async function refreshAuthAndRender() {
+  const w = await fetchWhoami();
+  applyWhoami(w);
+  renderProfileAccountControls();
+  renderStartScreen();
+}
+
+function signInAsAnotherUser() {
+  // The current localStorage UUID belongs to a registered account that isn't authed here.
+  // Wipe it so we boot fresh as a brand-new guest UUID.
+  localStorage.removeItem(PLAYER_ID_KEY);
+  localStorage.removeItem(PLAYER_ID_KEY + "_old");
+  location.reload();
 }
 
 function getStoredBgmVolume() {
@@ -356,6 +594,8 @@ function openProfileModal() {
   $("#profileNameInput").value = state.profile.name || state.nickname || "anon";
   renderProfilePill();
   renderAvatarGrid();
+  renderProfileAccountControls();
+  closeRegisterPanel();
   $("#profileModal").classList.remove("hidden");
   $("#profileNameInput")?.focus();
 }
@@ -486,17 +726,43 @@ function handleServer(msg) {
       $("#rerollCost").textContent = msg.constants.reroll_cost;
       if (msg.site_stats) syncSiteStats(msg.site_stats);
       renderProfilePill();
-      resumeRun(true);
+      // Edge case present: don't auto-resume — server would just reject with auth_required.
+      // The user has to log in first.
+      if (state.auth.edgeCase) {
+        renderStartScreen();
+      } else {
+        resumeRun(true);
+      }
+      break;
+    case "auth_required":
+      state.autoResumePending = false;
+      state.run = null;
+      state.lastBattle = null;
+      refreshAuthAndRender().then(() => {
+        show("start");
+        if (state.auth.edgeCase) {
+          flash("please sign in to continue", { variant: "info", duration: 3000 });
+        }
+      });
       break;
     case "profile":
       applyProfile(msg.profile);
       break;
-    case "state":
+    case "state": {
+      const wasAutoResume = state.autoResumePending;
       state.autoResumePending = false;
       state.run = msg.run;
       applyProfile(msg.profile || { name: msg.run.name, selected_avatar: state.profile.selected_avatar });
+      // A quiet auto-resume that lands on a stale game_over (e.g. a registered
+      // user logging back in days later) should jump straight into a new run
+      // instead of showing the old GG screen.
+      if (wasAutoResume && msg.run.phase === "game_over") {
+        startNewRun();
+        break;
+      }
       renderRun();
       break;
+    }
     case "battle":
       if (state.run && !isCurrentRunId(msg.run_id)) break;
       state.lastBattle = msg;
@@ -571,6 +837,10 @@ function handleServer(msg) {
       const m = msg.message;
       if (state.autoResumePending && m === "run not found") {
         state.autoResumePending = false;
+        // Signed-in users skip the "enter the arcade" landing entirely — they've
+        // already onboarded. Drop them into a new run automatically. First-time
+        // guests stay on the start screen so they see the log-in option.
+        if (state.auth.signedIn) startNewRun();
         break;
       }
       state.autoResumePending = false;
@@ -1744,12 +2014,55 @@ $("#goReplayBtn").onclick = () => {
   });
 };
 $("#goRestart").onclick = () => {
-  state.run = null;
   state.lastBattle = null;
   state.battleAnimating = false;
-  show("start");
+  startNewRun();
 };
 
 wireInventoryDrop();
+
+// ---- auth wiring ----
+$("#loginBtn")?.addEventListener("click", showLoginScreen);
+$("#loginBackBtn")?.addEventListener("click", () => {
+  $("#loginError").textContent = "";
+  show("start");
+});
+$("#loginForm")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  handleLoginSubmit({
+    username: $("#loginUsername").value.trim(),
+    password: $("#loginPassword").value,
+    stay: $("#loginStay").checked,
+    errEl: $("#loginError"),
+    onSuccess: () => show("start"),
+  });
+});
+$("#edgeCaseLoginForm")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  handleLoginSubmit({
+    username: state.auth.username || "",
+    password: $("#edgeCasePassword").value,
+    stay: $("#edgeCaseStay").checked,
+    errEl: $("#edgeCaseError"),
+    onSuccess: () => show("start"),
+  });
+});
+$("#signInAsOtherBtn")?.addEventListener("click", signInAsAnotherUser);
+$("#registerBtn")?.addEventListener("click", openRegisterPanel);
+$("#registerCancelBtn")?.addEventListener("click", closeRegisterPanel);
+$("#registerForm")?.addEventListener("submit", handleRegisterSubmit);
+$("#logoutBtn")?.addEventListener("click", async () => {
+  closeProfileModal();
+  await handleLogout();
+  show("start");
+});
+
 show("start");
-connect();
+
+(async function boot() {
+  const w = await fetchWhoami();
+  applyWhoami(w);
+  renderProfileAccountControls();
+  renderStartScreen();
+  connect();
+})();

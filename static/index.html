@@ -95,11 +95,62 @@
     </div>
 
     <section id="start" class="screen start-screen">
-      <h2>enter the arcade</h2>
-      <p class="hint">set your handle and avatar from the profile panel.</p>
-      <div class="row gameover-controls">
-        <button id="newRunBtn" class="primary">new run</button>
+      <div id="startNormal" class="start-stack">
+        <h2>enter the arcade</h2>
+        <p class="hint">set your handle and avatar from the profile panel.</p>
+        <button id="newRunBtn" class="primary start-cta" type="button">▶ new run</button>
+        <button id="loginBtn" class="auth-link start-login" type="button">log in</button>
       </div>
+      <div id="startEdgeCase" class="hidden">
+        <h2>welcome back</h2>
+        <div class="profile-editor-row edge-case-profile">
+          <span class="profile-avatar profile-avatar--large">
+            <img id="edgeCaseAvatar" src="" alt="" />
+          </span>
+          <div class="edge-case-identity">
+            <div class="edge-case-name" id="edgeCaseName"></div>
+            <div class="edge-case-username dim" id="edgeCaseUsername"></div>
+          </div>
+        </div>
+        <form id="edgeCaseLoginForm" class="auth-form" autocomplete="on">
+          <label class="auth-field">
+            <span>password</span>
+            <input id="edgeCasePassword" type="password" autocomplete="current-password" required />
+          </label>
+          <label class="auth-checkbox">
+            <input id="edgeCaseStay" type="checkbox" />
+            <span>stay signed in</span>
+          </label>
+          <div id="edgeCaseError" class="auth-error" role="alert"></div>
+          <div class="row controls">
+            <button type="submit" class="primary">sign in</button>
+          </div>
+        </form>
+        <button id="signInAsOtherBtn" class="auth-link" type="button">sign in as another user</button>
+      </div>
+    </section>
+
+    <section id="login" class="screen hidden">
+      <h2>sign in</h2>
+      <form id="loginForm" class="auth-form" autocomplete="on">
+        <label class="auth-field">
+          <span>username</span>
+          <input id="loginUsername" type="text" autocapitalize="none" autocomplete="username" required />
+        </label>
+        <label class="auth-field">
+          <span>password</span>
+          <input id="loginPassword" type="password" autocomplete="current-password" required />
+        </label>
+        <label class="auth-checkbox">
+          <input id="loginStay" type="checkbox" />
+          <span>stay signed in</span>
+        </label>
+        <div id="loginError" class="auth-error" role="alert"></div>
+        <div class="row controls">
+          <button type="submit" class="primary">sign in</button>
+          <button id="loginBackBtn" class="ghost" type="button">back</button>
+        </div>
+      </form>
     </section>
 
     <section id="shop" class="screen hidden">
@@ -201,6 +252,37 @@
           <button id="saveProfileBtn" class="primary" type="button">save</button>
         </div>
         <div id="profileProgress" class="profile-progress dim"></div>
+        <div id="profileAccountSection" class="profile-account-section">
+          <div id="profileAccountStatus" class="profile-account-status dim"></div>
+          <div class="row controls profile-account-controls">
+            <button id="registerBtn" class="ghost hidden" type="button">register account</button>
+            <button id="logoutBtn" class="ghost hidden" type="button">log out</button>
+          </div>
+          <div id="registerPanel" class="register-panel hidden">
+            <p class="register-warning">
+              <b>important:</b> there is no password recovery. write your username and password down before you submit.
+            </p>
+            <form id="registerForm" class="auth-form" autocomplete="off">
+              <label class="auth-field">
+                <span>username (3–24 chars, letters/numbers/_-)</span>
+                <input id="registerUsername" type="text" autocapitalize="none" autocomplete="off" required minlength="3" maxlength="24" />
+              </label>
+              <label class="auth-field">
+                <span>password (min 6 chars)</span>
+                <input id="registerPassword" type="password" autocomplete="new-password" required minlength="6" />
+              </label>
+              <label class="auth-field">
+                <span>confirm password</span>
+                <input id="registerPasswordConfirm" type="password" autocomplete="new-password" required minlength="6" />
+              </label>
+              <div id="registerError" class="auth-error" role="alert"></div>
+              <div class="row controls">
+                <button type="submit" class="primary">register</button>
+                <button id="registerCancelBtn" class="ghost" type="button">cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
         <h3>choose a profile picture</h3>
         <div id="profileAvatarGrid" class="profile-avatar-grid"></div>
       </div>

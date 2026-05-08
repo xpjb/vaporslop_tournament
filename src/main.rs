@@ -1,16 +1,19 @@
+mod auth;
 mod db;
 mod game;
 
+use auth::RateLimiter;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, Query, State,
     },
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
-use db::Db;
+use db::{AttachErr, Db};
 use game::combat::resolve_battle;
 use game::data::*;
 use game::shop::{ai_ladder_build, roll_shop};
@@ -20,14 +23,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
+
+const AUTH_RATE_LIMIT: usize = 10;
+const AUTH_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct AppState {
     db: Db,
     presence: Arc<Presence>,
     stats_tx: broadcast::Sender<SiteStats>,
+    rate: Arc<RateLimiter>,
 }
 
 #[derive(Default)]
@@ -190,6 +198,7 @@ enum ServerMsg {
     Error {
         message: String,
     },
+    AuthRequired,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,10 +323,15 @@ async fn main() -> anyhow::Result<()> {
         db,
         presence: Arc::new(Presence::default()),
         stats_tx,
+        rate: RateLimiter::new(),
     });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/whoami", get(whoami_handler))
+        .route("/api/register", post(register_handler))
+        .route("/api/login", post(login_handler))
+        .route("/api/logout", post(logout_handler))
         .nest_service("/assets", ServeDir::new("assets"))
         .nest_service("/", ServeDir::new("static"))
         .with_state(state);
@@ -329,12 +343,27 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let session_pid = auth::parse_session_cookie(&headers).and_then(|token| {
+        state
+            .db
+            .lookup_session(&token, auth::SHORT_SESSION_TTL_SECS)
+            .ok()
+            .flatten()
+    });
+    ws.on_upgrade(move |socket| handle_socket(socket, state, session_pid))
 }
 
 async fn send(socket: &mut WebSocket, msg: &ServerMsg) {
@@ -343,7 +372,24 @@ async fn send(socket: &mut WebSocket, msg: &ServerMsg) {
     }
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+/// Resolve the effective `player_id` for a message. If a session is active, override the
+/// body's id with the session's. Otherwise, refuse if the body's id is registered.
+fn resolve_player_id(
+    db: &Db,
+    session_pid: Option<&str>,
+    body_pid: &str,
+) -> Result<String, ()> {
+    if let Some(s) = session_pid {
+        return Ok(s.to_string());
+    }
+    let cleaned = clean_player_id(body_pid);
+    match db.username_for_player(&cleaned) {
+        Ok(Some(_)) => Err(()),
+        _ => Ok(cleaned),
+    }
+}
+
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid: Option<String>) {
     let mut registered_player: Option<String> = None;
     let mut current_run_id: Option<String> = None;
     // A freshly-started run with an empty team isn't persisted until the player makes a move
@@ -400,7 +446,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
                 match cmsg {
                     ClientMsg::NewRun { player_id, name } => {
-                        let player_id = clean_player_id(&player_id);
+                        let player_id = match resolve_player_id(&state.db, session_pid.as_deref(), &player_id) {
+                            Ok(p) => p,
+                            Err(()) => {
+                                send(&mut socket, &ServerMsg::AuthRequired).await;
+                                continue;
+                            }
+                        };
                         let profile = match state.db.ensure_player_profile(&player_id, &name) {
                             Ok(profile) => sanitize_stored_profile(profile),
                             Err(e) => {
@@ -449,7 +501,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         send(&mut socket, &ServerMsg::State { run, profile }).await;
                     }
                     ClientMsg::Resume { player_id } => {
-                        let player_id = clean_player_id(&player_id);
+                        let player_id = match resolve_player_id(&state.db, session_pid.as_deref(), &player_id) {
+                            Ok(p) => p,
+                            Err(()) => {
+                                send(&mut socket, &ServerMsg::AuthRequired).await;
+                                continue;
+                            }
+                        };
                         register_socket_player(&state, &mut registered_player, &player_id);
                         match state.db.load_latest_run_for_player(&player_id) {
                             Ok(Some(run)) => {
@@ -514,7 +572,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     ClientMsg::SetProfile { player_id, name, selected_avatar } => {
-                        let player_id = clean_player_id(&player_id);
+                        let player_id = match resolve_player_id(&state.db, session_pid.as_deref(), &player_id) {
+                            Ok(p) => p,
+                            Err(()) => {
+                                send(&mut socket, &ServerMsg::AuthRequired).await;
+                                continue;
+                            }
+                        };
                         register_socket_player(&state, &mut registered_player, &player_id);
                         let current_profile = match state.db.ensure_player_profile(&player_id, &name) {
                             Ok(profile) => sanitize_stored_profile(profile),
@@ -1113,4 +1177,222 @@ fn slot_accepts(target: ItemSlot, item: GearSlot) -> bool {
         GearSlot::Hat => target == ItemSlot::Hat,
         GearSlot::Hand => target == ItemSlot::LeftHand || target == ItemSlot::RightHand,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct WhoamiQuery {
+    player_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WhoamiResponse {
+    player_id: Option<String>,
+    username: Option<String>,
+    display_name: Option<String>,
+    avatar: Option<String>,
+    has_account: bool,
+    signed_in: bool,
+}
+
+async fn whoami_handler(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<WhoamiQuery>,
+) -> impl IntoResponse {
+    let (signed_in_pid, signed_in) = if let Some(token) = auth::parse_session_cookie(&headers) {
+        match state.db.lookup_session(&token, auth::SHORT_SESSION_TTL_SECS) {
+            Ok(Some(pid)) => (Some(pid), true),
+            _ => (None, false),
+        }
+    } else {
+        (None, false)
+    };
+
+    let pid: Option<String> = signed_in_pid.or_else(|| {
+        q.player_id
+            .as_deref()
+            .map(clean_player_id)
+            .filter(|s| !s.is_empty())
+    });
+
+    let (username, display_name, avatar) = match pid.as_deref() {
+        Some(p) => {
+            let username = state.db.username_for_player(p).ok().flatten();
+            let prof = state.db.load_profile(p).ok().flatten();
+            let display_name = prof.as_ref().map(|p| p.name.clone());
+            let avatar = prof.map(|p| sanitize_stored_profile(p).selected_avatar);
+            (username, display_name, avatar)
+        }
+        None => (None, None, None),
+    };
+
+    Json(WhoamiResponse {
+        player_id: pid,
+        has_account: username.is_some(),
+        username,
+        display_name,
+        avatar,
+        signed_in,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    player_id: String,
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthErrorBody {
+    error: String,
+}
+
+fn auth_err(code: StatusCode, msg: &str) -> axum::response::Response {
+    (
+        code,
+        Json(AuthErrorBody {
+            error: msg.to_string(),
+        }),
+    )
+        .into_response()
+}
+
+async fn register_handler(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> axum::response::Response {
+    let ip = auth::client_ip(&headers, peer.ip());
+    if !state.rate.allow(ip, AUTH_RATE_LIMIT, AUTH_RATE_WINDOW) {
+        return auth_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    let username = match auth::validate_username(&req.username) {
+        Ok(u) => u,
+        Err(e) => return auth_err(StatusCode::BAD_REQUEST, e),
+    };
+    if let Err(e) = auth::validate_password(&req.password) {
+        return auth_err(StatusCode::BAD_REQUEST, e);
+    }
+    let player_id = clean_player_id(&req.player_id);
+    if player_id.is_empty() {
+        return auth_err(StatusCode::BAD_REQUEST, "player_id_required");
+    }
+    let hash = match auth::hash_password(&req.password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("argon2: {e}");
+            return auth_err(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+    };
+    match state.db.attach_credentials(&player_id, &username, &hash) {
+        Ok(()) => {}
+        Err(AttachErr::AlreadyRegistered) => {
+            return auth_err(StatusCode::CONFLICT, "already_registered")
+        }
+        Err(AttachErr::UsernameTaken) => {
+            return auth_err(StatusCode::CONFLICT, "username_taken")
+        }
+        Err(AttachErr::Db(e)) => {
+            tracing::error!("attach_credentials: {e}");
+            return auth_err(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+    }
+    let token = match state
+        .db
+        .create_session(&player_id, auth::SHORT_SESSION_TTL_SECS)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("create_session: {e}");
+            return auth_err(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+    };
+    let cookie = auth::set_session_cookie(&token, auth::SHORT_SESSION_TTL_SECS, &headers);
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "ok": true, "player_id": player_id })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+    #[serde(default)]
+    stay: bool,
+}
+
+async fn login_handler(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> axum::response::Response {
+    let ip = auth::client_ip(&headers, peer.ip());
+    if !state.rate.allow(ip, AUTH_RATE_LIMIT, AUTH_RATE_WINDOW) {
+        return auth_err(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    }
+    let username = req.username.trim().to_string();
+    if username.is_empty() || req.password.is_empty() {
+        return auth_err(StatusCode::BAD_REQUEST, "invalid_credentials");
+    }
+    let account = match state.db.find_account(&username) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("find_account: {e}");
+            return auth_err(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+    };
+    let (player_id, hash) = match account {
+        Some(a) => a,
+        None => return auth_err(StatusCode::UNAUTHORIZED, "invalid_credentials"),
+    };
+    let password = req.password.clone();
+    let hash_clone = hash.clone();
+    let verified = tokio::task::spawn_blocking(move || auth::verify_password(&password, &hash_clone))
+        .await
+        .unwrap_or(false);
+    if !verified {
+        return auth_err(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    }
+    let ttl = if req.stay {
+        auth::LONG_SESSION_TTL_SECS
+    } else {
+        auth::SHORT_SESSION_TTL_SECS
+    };
+    let token = match state.db.create_session(&player_id, ttl) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("create_session: {e}");
+            return auth_err(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+    };
+    let cookie = auth::set_session_cookie(&token, ttl, &headers);
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "ok": true, "player_id": player_id })),
+    )
+        .into_response()
+}
+
+async fn logout_handler(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if let Some(token) = auth::parse_session_cookie(&headers) {
+        let _ = state.db.delete_session(&token);
+    }
+    let cookie = auth::clear_session_cookie(&headers);
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
 }

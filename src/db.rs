@@ -10,6 +10,25 @@ pub struct Db {
     conn: Arc<Mutex<Connection>>,
 }
 
+#[derive(Debug)]
+pub enum AttachErr {
+    AlreadyRegistered,
+    UsernameTaken,
+    Db(rusqlite::Error),
+}
+
+impl std::fmt::Display for AttachErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachErr::AlreadyRegistered => write!(f, "already_registered"),
+            AttachErr::UsernameTaken => write!(f, "username_taken"),
+            AttachErr::Db(e) => write!(f, "db_error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AttachErr {}
+
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -118,6 +137,32 @@ impl Db {
                 ultimate_victories INTEGER NOT NULL DEFAULT 0
             );",
         )?;
+        ensure_column(&conn, "player_profiles", "username", "TEXT")?;
+        ensure_column(&conn, "player_profiles", "password_hash", "TEXT")?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_username
+             ON player_profiles(username COLLATE NOCASE)
+             WHERE username IS NOT NULL",
+            [],
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                player_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_player ON sessions(player_id);",
+        )?;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_at < ?1",
+            params![now_secs],
+        )?;
         recompute_cost_values(&conn)?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
@@ -198,6 +243,148 @@ impl Db {
             params![player_id, name],
         )?;
         load_player_profile_on(&conn, player_id)
+    }
+
+    pub fn username_for_player(&self, player_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT username FROM player_profiles WHERE player_id = ?1")?;
+        let mut rows = stmt.query([player_id])?;
+        if let Some(row) = rows.next()? {
+            let username: Option<String> = row.get(0)?;
+            Ok(username.filter(|s| !s.is_empty()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn attach_credentials(
+        &self,
+        player_id: &str,
+        username: &str,
+        password_hash: &str,
+    ) -> std::result::Result<(), AttachErr> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO player_profiles(player_id,name,selected_avatar,best_wins,ultimate_victories)
+             VALUES(?1,'anon','meme_man',0,0)",
+            params![player_id],
+        )
+        .map_err(AttachErr::Db)?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT username FROM player_profiles WHERE player_id = ?1",
+                [player_id],
+                |row| row.get(0),
+            )
+            .map_err(AttachErr::Db)?;
+        if existing.as_deref().filter(|s| !s.is_empty()).is_some() {
+            return Err(AttachErr::AlreadyRegistered);
+        }
+        let res = conn.execute(
+            "UPDATE player_profiles SET username = ?2, password_hash = ?3 WHERE player_id = ?1",
+            params![player_id, username, password_hash],
+        );
+        match res {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(AttachErr::UsernameTaken)
+            }
+            Err(e) => Err(AttachErr::Db(e)),
+        }
+    }
+
+    /// Find a registered account by username (case-insensitive). Returns (player_id, password_hash).
+    pub fn find_account(&self, username: &str) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT player_id, password_hash FROM player_profiles
+             WHERE username = ?1 COLLATE NOCASE
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([username])?;
+        if let Some(row) = rows.next()? {
+            let pid: String = row.get(0)?;
+            let hash: Option<String> = row.get(1)?;
+            if let Some(hash) = hash.filter(|s| !s.is_empty()) {
+                return Ok(Some((pid, hash)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn create_session(&self, player_id: &str, ttl_secs: i64) -> Result<String> {
+        let token = crate::auth::gen_session_token();
+        let now = crate::auth::now_unix();
+        let expires_at = now + ttl_secs;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO sessions(token, player_id, created_at, expires_at, last_seen_at)
+             VALUES(?1, ?2, ?3, ?4, ?3)",
+            params![token, player_id, now, expires_at],
+        )?;
+        Ok(token)
+    }
+
+    /// Look up a session by token. Returns the bound `player_id` if it's still valid, otherwise
+    /// `None` (and removes the row if expired). On a successful hit, slides `expires_at` forward
+    /// by `slide_ttl_secs` so active sessions don't expire underfoot.
+    pub fn lookup_session(&self, token: &str, slide_ttl_secs: i64) -> Result<Option<String>> {
+        if token.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock();
+        let now = crate::auth::now_unix();
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT player_id, expires_at FROM sessions WHERE token = ?1",
+                [token],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let Some((player_id, expires_at)) = row else {
+            return Ok(None);
+        };
+        if expires_at <= now {
+            let _ = conn.execute("DELETE FROM sessions WHERE token = ?1", [token]);
+            return Ok(None);
+        }
+        let new_expires = now + slide_ttl_secs;
+        conn.execute(
+            "UPDATE sessions SET last_seen_at = ?2, expires_at = MAX(expires_at, ?3) WHERE token = ?1",
+            params![token, now, new_expires],
+        )?;
+        Ok(Some(player_id))
+    }
+
+    pub fn delete_session(&self, token: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM sessions WHERE token = ?1", [token])?;
+        Ok(())
+    }
+
+    /// Read-only profile load; returns `None` if no row exists (does not create one).
+    pub fn load_profile(&self, player_id: &str) -> Result<Option<PlayerProfile>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT player_id,name,selected_avatar,best_wins,ultimate_victories
+             FROM player_profiles
+             WHERE player_id = ?1",
+        )?;
+        let mut rows = stmt.query([player_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(PlayerProfile {
+                player_id: row.get(0)?,
+                name: row.get(1)?,
+                selected_avatar: row.get(2)?,
+                best_wins: row.get(3)?,
+                ultimate_victories: row.get(4)?,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn profile_avatar(&self, player_id: &str) -> Result<Option<String>> {

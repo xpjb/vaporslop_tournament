@@ -1,3 +1,5 @@
 /target
+*.sqlite-shm
+*.sqlite-wal
 *.sqlite
 /node_modules

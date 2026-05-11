@@ -397,43 +397,117 @@ header h1 {
 }
 #status {
   position: fixed;
-  top: 1rem;
-  right: 1rem;
+  top: 1.2rem;
+  left: 50%;
   z-index: 120;
-  max-width: min(26rem, calc(100vw - 2rem));
-  padding: 0.5rem 0.8rem;
-  border: 1px solid rgba(74, 242, 255, 0.75);
-  background: rgba(12, 0, 32, 0.92);
+  max-width: min(32rem, calc(100vw - 2rem));
+  padding: 0.7rem 1.4rem;
+  border: 1px solid rgba(74, 242, 255, 0.85);
+  border-radius: 4px;
+  background:
+    linear-gradient(135deg, rgba(255, 92, 242, 0.18), rgba(164, 92, 255, 0.14) 45%, rgba(74, 242, 255, 0.18)),
+    rgba(12, 0, 32, 0.94);
   box-shadow:
-    0 0 18px rgba(74, 242, 255, 0.22),
-    0 0 24px rgba(255, 92, 242, 0.18),
-    inset 0 0 12px rgba(255, 255, 255, 0.05);
-  text-align: right;
-  font-size: clamp(0.95rem, 2.6vw, 1.2rem);
+    0 0 0 1px rgba(255, 92, 242, 0.35),
+    0 0 22px rgba(74, 242, 255, 0.45),
+    0 0 38px rgba(255, 92, 242, 0.35),
+    0 10px 30px rgba(0, 0, 0, 0.55),
+    inset 0 0 14px rgba(255, 255, 255, 0.06);
+  text-align: center;
+  font-size: clamp(1rem, 2.6vw, 1.3rem);
   line-height: 1.3;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: lowercase;
-  word-break: break-word;
+  white-space: normal;
+  word-break: normal;
   opacity: 0;
-  transform: translateY(-0.45rem);
+  transform: translate(-50%, -1.2rem) scale(0.7);
   pointer-events: none;
   transition:
-    opacity 0.2s ease,
-    transform 0.2s ease,
+    opacity 0.22s ease,
+    transform 0.34s cubic-bezier(0.68, -0.55, 0.265, 1.55),
     color 0.15s ease,
-    text-shadow 0.15s ease;
+    text-shadow 0.15s ease,
+    box-shadow 0.2s ease;
+}
+#status.status--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: min(22rem, calc(100vw - 2rem));
+}
+.status-title {
+  color: #ff3b6b;
+  font-size: 1.35em;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-shadow:
+    0 0 6px rgba(255, 59, 107, 0.95),
+    0 0 16px rgba(255, 59, 107, 0.75),
+    0 0 28px rgba(255, 92, 242, 0.55);
+}
+.status-body {
+  color: #fff;
+  font-size: 0.95em;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.35);
 }
 #status.status--visible {
   opacity: 1;
-  transform: translateY(0);
+  transform: translate(-50%, 0) scale(1);
+  animation: statusPulse 1.6s ease-in-out infinite;
+}
+#status.status--visible.status--bump {
+  animation:
+    statusBump 0.42s cubic-bezier(0.68, -0.55, 0.265, 1.55),
+    statusPulse 1.6s ease-in-out 0.42s infinite;
+}
+@keyframes statusBump {
+  0%   { transform: translate(-50%, 0) scale(1); }
+  35%  { transform: translate(-50%, -0.2rem) scale(1.18); }
+  70%  { transform: translate(-50%, 0) scale(0.96); }
+  100% { transform: translate(-50%, 0) scale(1); }
 }
 #status.status--error {
-  color: var(--neon-pink);
-  text-shadow: 0 0 10px rgba(255, 92, 242, 0.85);
+  color: #fff;
+  border-color: rgba(255, 92, 242, 0.95);
+  text-shadow:
+    0 0 8px rgba(255, 92, 242, 0.95),
+    0 0 18px rgba(255, 92, 242, 0.7),
+    0 0 30px rgba(164, 92, 255, 0.5);
+  box-shadow:
+    0 0 0 1px rgba(255, 92, 242, 0.55),
+    0 0 26px rgba(255, 92, 242, 0.55),
+    0 0 48px rgba(164, 92, 255, 0.4),
+    0 10px 30px rgba(0, 0, 0, 0.55),
+    inset 0 0 14px rgba(255, 92, 242, 0.12);
 }
 #status.status--info {
   color: var(--neon-yellow);
-  text-shadow: 0 0 8px rgba(255, 243, 108, 0.5);
+  text-shadow:
+    0 0 8px rgba(255, 243, 108, 0.9),
+    0 0 18px rgba(74, 242, 255, 0.55),
+    0 0 30px rgba(255, 92, 242, 0.35);
+}
+@keyframes statusPulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px rgba(255, 92, 242, 0.35),
+      0 0 22px rgba(74, 242, 255, 0.45),
+      0 0 38px rgba(255, 92, 242, 0.35),
+      0 10px 30px rgba(0, 0, 0, 0.55),
+      inset 0 0 14px rgba(255, 255, 255, 0.06);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(74, 242, 255, 0.55),
+      0 0 28px rgba(255, 92, 242, 0.55),
+      0 0 48px rgba(74, 242, 255, 0.4),
+      0 10px 30px rgba(0, 0, 0, 0.55),
+      inset 0 0 14px rgba(255, 255, 255, 0.08);
+  }
 }
 @media (max-width: 720px) {
   header {
@@ -495,8 +569,10 @@ header h1 {
   #status {
     margin-left: 0;
     text-align: center;
-    width: 100%;
-    font-size: clamp(1rem, 3.8vw, 1.15rem);
+    max-width: calc(100vw - 1.5rem);
+    white-space: normal;
+    font-size: clamp(1rem, 3.8vw, 1.2rem);
+    padding: 0.6rem 1rem;
   }
 }
 .dim { color: var(--neon-cyan); opacity: 0.7; font-size: 0.7em; }
@@ -983,18 +1059,17 @@ input {
   background: rgba(12, 0, 32, 0.88);
 }
 #shop.screen .controls #quitRunBtn { margin-right: auto; }
-.battle-controls { width: 100%; justify-content: flex-start; align-items: center; }
+.battle-controls { width: 100%; justify-content: flex-start; align-items: stretch; }
 .battle-controls #nextRoundBtn { margin-left: auto; }
-.gameover-controls { width: 100%; justify-content: flex-end; align-items: center; }
+.gameover-controls { width: 100%; justify-content: flex-end; align-items: stretch; }
 .gameover-controls #copyGoReplayLinkBtn,
 .gameover-controls #goReplayBtn { margin-right: 0; }
-.gameover-controls #copyGoReplayLinkBtn { margin-right: 0.35rem; }
-.gameover-controls #goReplayBtn { margin-right: auto; }
+.gameover-controls #goReplayBtn { margin-right: 0.35rem; }
+.gameover-controls #copyGoReplayLinkBtn { margin-right: auto; }
 .replay-link-btn {
   min-width: 2.8rem;
-  padding: 0.45rem 0.7rem;
-  font-size: 1.2rem;
-  line-height: 1;
+  padding: 0.5rem 0.7rem;
+  font-size: 1.1rem;
   border-color: var(--neon-cyan);
   color: var(--neon-cyan);
   text-transform: none;
@@ -2308,6 +2383,30 @@ input {
 .profile-account-status {
   font-size: 0.78rem;
   margin-bottom: 0.5rem;
+}
+.profile-account-signed-row {
+  display: inline;
+}
+button.profile-logout-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  box-shadow: none;
+  text-transform: lowercase;
+  vertical-align: baseline;
+}
+button.profile-logout-link:hover {
+  background: none;
+  opacity: 0.9;
 }
 .profile-account-controls {
   margin-bottom: 0.4rem;

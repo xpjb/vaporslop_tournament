@@ -187,8 +187,8 @@
       <canvas id="battleCanvas" width="900" height="320"></canvas>
       <div id="battleLog"></div>
       <div class="row battle-controls">
-        <button id="copyReplayLinkBtn" class="ghost replay-link-btn hidden" type="button" aria-label="copy replay link" title="copy replay link">🔗</button>
         <button id="replayBattleBtn" class="hidden" type="button">↻ replay</button>
+        <button id="copyReplayLinkBtn" class="ghost replay-link-btn hidden" type="button" aria-label="copy replay link" title="copy replay link">🔗</button>
         <button id="nextRoundBtn" class="primary hidden">continue</button>
       </div>
     </section>
@@ -205,8 +205,8 @@
         <canvas id="goReplayCanvas" width="900" height="320"></canvas>
       </div>
       <div class="row gameover-controls">
-        <button id="copyGoReplayLinkBtn" class="ghost replay-link-btn hidden" type="button" aria-label="copy replay link" title="copy replay link">🔗</button>
         <button id="goReplayBtn" class="hidden" type="button">↻ replay</button>
+        <button id="copyGoReplayLinkBtn" class="ghost replay-link-btn hidden" type="button" aria-label="copy replay link" title="copy replay link">🔗</button>
         <button id="goRestart" class="primary">new run</button>
       </div>
     </section>
@@ -260,10 +260,14 @@
         </div>
         <ul id="profileStats" class="profile-stats" aria-label="profile stats"></ul>
         <div id="profileAccountSection" class="profile-account-section">
-          <div id="profileAccountStatus" class="profile-account-status dim"></div>
+          <div id="profileAccountStatus" class="profile-account-status dim">
+            <span id="profileAccountSignedRow" class="profile-account-signed-row hidden">
+              <span id="profileAccountHandle"></span><span aria-hidden="true">, </span><button id="logoutBtn" class="profile-logout-link" type="button">logout</button>
+            </span>
+            <span id="profileAccountStatusOnly"></span>
+          </div>
           <div class="row controls profile-account-controls">
             <button id="registerBtn" class="ghost hidden" type="button">register account</button>
-            <button id="logoutBtn" class="ghost hidden" type="button">log out</button>
           </div>
           <div id="registerPanel" class="register-panel hidden">
             <p class="register-warning">

@@ -230,25 +230,30 @@ function renderStartScreen() {
 }
 
 function renderProfileAccountControls() {
-  const status = $("#profileAccountStatus");
+  const signedRow = $("#profileAccountSignedRow");
+  const handleEl = $("#profileAccountHandle");
+  const statusOnly = $("#profileAccountStatusOnly");
   const registerBtn = $("#registerBtn");
-  const logoutBtn = $("#logoutBtn");
   const panel = $("#registerPanel");
-  if (!status || !registerBtn || !logoutBtn || !panel) return;
+  if (!signedRow || !handleEl || !statusOnly || !registerBtn || !panel) return;
   if (state.auth.signedIn && state.auth.username) {
-    status.textContent = `@${state.auth.username}`;
+    handleEl.textContent = `@${state.auth.username}`;
+    signedRow.classList.remove("hidden");
+    statusOnly.textContent = "";
+    statusOnly.classList.add("hidden");
     registerBtn.classList.add("hidden");
-    logoutBtn.classList.remove("hidden");
     panel.classList.add("hidden");
   } else if (state.auth.hasAccount) {
-    status.textContent = `@${state.auth.username || ""} — signed out`;
+    signedRow.classList.add("hidden");
+    statusOnly.textContent = `@${state.auth.username || ""} — signed out`;
+    statusOnly.classList.remove("hidden");
     registerBtn.classList.add("hidden");
-    logoutBtn.classList.add("hidden");
     panel.classList.add("hidden");
   } else {
-    status.textContent = "guest — register to save progress across devices.";
+    signedRow.classList.add("hidden");
+    statusOnly.textContent = "guest — register to save progress across devices.";
+    statusOnly.classList.remove("hidden");
     registerBtn.classList.remove("hidden");
-    logoutBtn.classList.add("hidden");
   }
 }
 
@@ -1538,41 +1543,59 @@ function pulseHudMoney() {
 function insufficientMoneyLine(price) {
   const bal = state.run?.money ?? 0;
   if (price <= bal) return null;
-  return `need $${price - bal} more — costs $${price}, have $${bal}`;
+  return { title: "not enough money", body: `need $${price}, have $${bal}` };
 }
 
-/** @returns {string|null} */
 function insufficientRerollLine() {
   const cost = state.consts.reroll_cost ?? 10;
   const bal = state.run?.money ?? 0;
   if (bal >= cost) return null;
-  return `need $${cost - bal} more to reroll — costs $${cost}, have $${bal}`;
+  return { title: "not enough money", body: `reroll costs $${cost}, have $${bal}` };
 }
 
-function flash(text, opts = {}) {
+function flash(content, opts = {}) {
   const el = $("#status");
   if (!el) return;
   const { variant = "info", duration = 2400, shakeMoney = false } = opts;
+  const shownFor = Math.max(300, Math.round(duration * 0.5));
   if (flashTimer) clearTimeout(flashTimer);
   if (flashHideTimer) clearTimeout(flashHideTimer);
-  el.textContent = text;
-  el.classList.remove("status--error", "status--info", "status--visible");
+  const wasVisible = el.classList.contains("status--visible");
+  el.classList.remove("status--error", "status--info", "status--visible", "status--stacked", "status--bump");
+  if (content && typeof content === "object" && content.title) {
+    const title = document.createElement("div");
+    title.className = "status-title";
+    title.textContent = content.title;
+    const body = document.createElement("div");
+    body.className = "status-body";
+    body.textContent = content.body ?? "";
+    el.replaceChildren(title, body);
+    el.classList.add("status--stacked");
+  } else {
+    el.textContent = typeof content === "string" ? content : "";
+  }
   el.classList.add(variant === "error" ? "status--error" : "status--info");
   el.setAttribute("role", variant === "error" ? "alert" : "status");
   el.setAttribute("aria-live", variant === "error" ? "assertive" : "polite");
   if (shakeMoney) pulseHudMoney();
-  requestAnimationFrame(() => el.classList.add("status--visible"));
+  requestAnimationFrame(() => {
+    el.classList.add("status--visible");
+    if (wasVisible) {
+      void el.offsetWidth;
+      el.classList.add("status--bump");
+    }
+  });
   flashTimer = setTimeout(() => {
     el.classList.remove("status--visible");
     flashHideTimer = setTimeout(() => {
-      el.textContent = "";
-      el.classList.remove("status--error", "status--info");
+      el.replaceChildren();
+      el.classList.remove("status--error", "status--info", "status--stacked");
       el.setAttribute("role", "status");
       el.setAttribute("aria-live", "polite");
       flashHideTimer = null;
-    }, 200);
+    }, 260);
     flashTimer = null;
-  }, duration);
+  }, shownFor);
 }
 
 function loadLeaderboardPayload({ around = false } = {}) {

@@ -1717,7 +1717,7 @@ function renderItemSockets(teamIdx, member) {
     .filter((r) => r.itemProp === "right_hand" || r.itemProp === "hand_4")
     .forEach((r) => appendSocket(rightCol, r));
 
-  root.append(leftCol, hatCol, rightCol);
+  root.append(hatCol, leftCol, rightCol);
   return root;
 }
 function onCharacterDragStart(e) {

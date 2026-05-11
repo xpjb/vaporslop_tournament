@@ -523,7 +523,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     floaters.push({
       text,
       x: p.x + rand(-16, 16),
-      y: p.y + rand(-10, 8) + (opts.dy ?? 0),
+      y: p.y + rand(-10, 8),
       vx: opts.vx ?? rand(-0.18, 0.18),
       vy: opts.vy ?? -0.75,
       color: opts.color ?? "#fff36c",
@@ -771,14 +771,6 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
               size: amt > 9 ? 15 : 17,
               ttl: 820,
               vy: -0.58,
-            });
-            emitFloater(s, "might · reflex · wisdom · max HP", {
-              color: "rgba(200, 235, 248, 0.95)",
-              stroke: "rgba(12, 28, 38, 0.88)",
-              size: 11,
-              ttl: 780,
-              vy: -0.44,
-              dy: 16,
             });
             emitParticles(p.x, p.y + 4, 14, {
               color: "#7ec8e3",

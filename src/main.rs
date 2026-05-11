@@ -224,6 +224,10 @@ enum ServerMsg {
         wins: i32,
         losses: i32,
         alive: bool,
+        /// Seed that drove `resolve_battle`. Persisted on the replay row.
+        combat_seed: u32,
+        /// Pool id of the enemy snapshot (`None` for synthetic AI). Persisted on the replay row.
+        enemy_opponent_id: Option<i64>,
     },
     Leaderboard {
         entries: Vec<LbEntry>,
@@ -699,13 +703,24 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                         match result {
                             Ok(extra) => {
                                 let save_result = if is_battle {
-                                    let (update_mmr, outcome) = match &extra {
-                                        Some(ServerMsg::Battle { winner, opponent_mmr_before, .. }) => (
-                                            opponent_mmr_before.is_some(),
-                                            battle_outcome(*winner),
-                                        ),
-                                        _ => (false, BattleOutcome::Draw),
-                                    };
+                                    let (update_mmr, outcome, combat_seed, enemy_opponent_id, player_mmr_before) =
+                                        match &extra {
+                                            Some(ServerMsg::Battle {
+                                                winner,
+                                                opponent_mmr_before,
+                                                combat_seed,
+                                                enemy_opponent_id,
+                                                player_mmr_before,
+                                                ..
+                                            }) => (
+                                                opponent_mmr_before.is_some(),
+                                                battle_outcome(*winner),
+                                                *combat_seed,
+                                                *enemy_opponent_id,
+                                                *player_mmr_before,
+                                            ),
+                                            _ => (false, BattleOutcome::Draw, 0u32, None, run.mmr),
+                                        };
                                     let completed_ultimate_victory =
                                         run.phase == Phase::GameOver && run.wins >= MAX_WINS;
                                     state.db.record_battle_and_save_state(
@@ -713,6 +728,9 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                         outcome,
                                         update_mmr,
                                         completed_ultimate_victory,
+                                        enemy_opponent_id,
+                                        combat_seed,
+                                        player_mmr_before,
                                     )
                                 } else {
                                     state.db.upsert_player_state(&run)
@@ -1008,10 +1026,13 @@ async fn handle_run_action(
             }
             let player_mmr_before = run.mmr;
             let target_gold = total_earned_gold(run);
-            let mut rng = Rng::new_random();
+            // `mm_rng` drives matchmaking + (when fallback) bot generation. `combat_seed`
+            // is recorded on the replay row so the fight is byte-for-byte reproducible
+            // independently of which opponent was picked.
+            let mut mm_rng = Rng::new_random();
             let opponent = state
                 .db
-                .find_opponent(&run.player_id, target_gold, &mut rng)
+                .find_opponent(&run.player_id, target_gold, &mut mm_rng)
                 .map_err(|e| e.to_string())?;
             let player_avatar = state
                 .db
@@ -1019,24 +1040,34 @@ async fn handle_run_action(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
-            let (op_name, op_build_raw, opponent_mmr_before, opponent_avatar) = match opponent {
-                Some((_id, opponent_player_id, name, b, mmr)) => {
-                    let avatar = state
-                        .db
-                        .profile_avatar(&opponent_player_id)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
-                    (name, b, Some(mmr), avatar)
-                }
-                None => (
-                    synthetic_opponent_name(&mut rng),
-                    ai_ladder_build(target_gold.max(50), &mut rng),
-                    None,
-                    DEFAULT_PROFILE_AVATAR.to_string(),
-                ),
-            };
-            let res = resolve_battle(&run.build, &op_build_raw, &mut rng);
+            let (op_name, op_build_raw, opponent_mmr_before, opponent_avatar, enemy_opponent_id) =
+                match opponent {
+                    Some((opponent_id, opponent_player_id, b, mmr)) => {
+                        let name = state
+                            .db
+                            .profile_name(&opponent_player_id)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "anon".to_string());
+                        let avatar = state
+                            .db
+                            .profile_avatar(&opponent_player_id)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
+                        (name, b, Some(mmr), avatar, Some(opponent_id))
+                    }
+                    None => (
+                        synthetic_opponent_name(&mut mm_rng),
+                        ai_ladder_build(target_gold.max(50), &mut mm_rng),
+                        None,
+                        DEFAULT_PROFILE_AVATAR.to_string(),
+                        None,
+                    ),
+                };
+            let combat_seed: u32 = Rng::new_random().next_u32();
+            let mut combat_rng = Rng::new(combat_seed);
+            let res = resolve_battle(&run.build, &op_build_raw, &mut combat_rng);
             if let Some(opponent_mmr) = opponent_mmr_before {
                 run.mmr = updated_mmr(player_mmr_before, opponent_mmr, battle_score(res.winner));
             }
@@ -1056,7 +1087,7 @@ async fn handle_run_action(
                 run.phase = Phase::GameOver;
             } else {
                 run.phase = Phase::Shop;
-                run.shop = roll_shop(&mut rng);
+                run.shop = roll_shop(&mut mm_rng);
             }
             Ok(Some(ServerMsg::Battle {
                 run_id: run.id.clone(),
@@ -1073,6 +1104,8 @@ async fn handle_run_action(
                 wins: run.wins,
                 losses: run.losses,
                 alive: run.alive,
+                combat_seed,
+                enemy_opponent_id,
             }))
         }
         ClientMsg::NextRound => {

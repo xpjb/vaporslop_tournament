@@ -16,9 +16,9 @@ use axum::{
 use db::{AttachErr, BattleOutcome, Db};
 use game::combat::resolve_battle;
 use game::data::*;
+use game::rng::Rng;
 use game::shop::{ai_ladder_build, roll_shop};
 use game::types::*;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -538,6 +538,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                 continue;
                             }
                         };
+                        let mut rng = Rng::new_random();
                         let run = Run {
                             id: uuid::Uuid::new_v4().to_string(),
                             player_id,
@@ -550,7 +551,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                             best_streak: 0,
                             mmr,
                             build: Build::default(),
-                            shop: roll_shop(),
+                            shop: roll_shop(&mut rng),
                             phase: Phase::Shop,
                         };
                         register_socket_player(&state, &mut registered_player, &mut evict_notify, &run.player_id);
@@ -994,7 +995,7 @@ async fn handle_run_action(
                 return Err(insufficient_reroll_msg(run.money));
             }
             run.money -= REROLL_COST;
-            run.shop = roll_shop();
+            run.shop = roll_shop(&mut Rng::new_random());
             Ok(None)
         }
         ClientMsg::Battle => {
@@ -1006,9 +1007,10 @@ async fn handle_run_action(
             }
             let player_mmr_before = run.mmr;
             let target_gold = total_earned_gold(run);
+            let mut rng = Rng::new_random();
             let opponent = state
                 .db
-                .find_opponent(&run.player_id, target_gold)
+                .find_opponent(&run.player_id, target_gold, &mut rng)
                 .map_err(|e| e.to_string())?;
             let player_avatar = state
                 .db
@@ -1027,13 +1029,13 @@ async fn handle_run_action(
                     (name, b, Some(mmr), avatar)
                 }
                 None => (
-                    synthetic_opponent_name(),
-                    ai_ladder_build(target_gold.max(50)),
+                    synthetic_opponent_name(&mut rng),
+                    ai_ladder_build(target_gold.max(50), &mut rng),
                     None,
                     DEFAULT_PROFILE_AVATAR.to_string(),
                 ),
             };
-            let res = resolve_battle(&run.build, &op_build_raw);
+            let res = resolve_battle(&run.build, &op_build_raw, &mut rng);
             if let Some(opponent_mmr) = opponent_mmr_before {
                 run.mmr = updated_mmr(player_mmr_before, opponent_mmr, battle_score(res.winner));
             }
@@ -1053,7 +1055,7 @@ async fn handle_run_action(
                 run.phase = Phase::GameOver;
             } else {
                 run.phase = Phase::Shop;
-                run.shop = roll_shop();
+                run.shop = roll_shop(&mut rng);
             }
             Ok(Some(ServerMsg::Battle {
                 run_id: run.id.clone(),
@@ -1175,7 +1177,7 @@ fn updated_mmr(player_mmr: i32, opponent_mmr: i32, score: f64) -> i32 {
         .max(0.0) as i32
 }
 
-fn synthetic_opponent_name() -> String {
+fn synthetic_opponent_name(rng: &mut Rng) -> String {
     const TAGS: &[&str] = &[
         "aesthet1c",
         "vapor",
@@ -1190,12 +1192,9 @@ fn synthetic_opponent_name() -> String {
         "neon",
         "glitch",
     ];
-    let mut rng = rand::thread_rng();
-    format!(
-        "{}_bot_{:03}",
-        TAGS[rng.gen_range(0..TAGS.len())],
-        rng.gen_range(1..=999)
-    )
+    let tag = rng.choice(TAGS).copied().unwrap();
+    let n = (rng.next_u32() % 999) + 1;
+    format!("{}_bot_{:03}", tag, n)
 }
 
 fn member_item_slot(member: &TeamMember, slot: ItemSlot) -> &Option<String> {

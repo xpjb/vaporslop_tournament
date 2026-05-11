@@ -1,6 +1,6 @@
 use crate::game::data::*;
+use crate::game::rng::Rng;
 use crate::game::types::*;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// A combatant materialized for battle.
@@ -548,7 +548,7 @@ fn hit_chance(att: &Combatant, def: &Combatant) -> f32 {
 }
 
 /// After a successful hit, roll crit from attacker's properties (first matching `CritStrike`).
-fn roll_crit_damage(base: i32, props: &[Property], rng: &mut impl Rng) -> (i32, bool) {
+fn roll_crit_damage(base: i32, props: &[Property], rng: &mut Rng) -> (i32, bool) {
     if base <= 0 {
         return (base, false);
     }
@@ -562,7 +562,7 @@ fn roll_crit_damage(base: i32, props: &[Property], rng: &mut impl Rng) -> (i32, 
         return (base, false);
     };
     let p = (pct as f32 / 100.0).clamp(0.0, 1.0);
-    if rng.gen::<f32>() < p {
+    if rng.chance(p) {
         (base.saturating_mul(2), true)
     } else {
         (base, false)
@@ -1151,8 +1151,7 @@ fn apply_damage_enemy_on_death(
     );
 }
 
-pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
-    let mut rng = rand::thread_rng();
+pub fn resolve_battle(left_build: &Build, right_build: &Build, rng: &mut Rng) -> BattleResult {
     let mut uid_counter: u32 = 1;
     let mut left = build_team(left_build, 0, &mut uid_counter);
     let mut right = build_team(right_build, 1, &mut uid_counter);
@@ -1324,12 +1323,12 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                             continue;
                         };
                         let chance = hit_chance(&attacker_snapshot, &foes[foe_idx]);
-                        let hit = rng.gen::<f32>() < chance;
+                        let hit = rng.chance(chance);
                         let (damage, critical) = if hit {
                             let raw = roll_crit_damage(
                                 damage_stat,
                                 &attacker_snapshot.properties,
-                                &mut rng,
+                                rng,
                             );
                             (damage_after_armour(raw.0, &foes[foe_idx]), raw.1)
                         } else {

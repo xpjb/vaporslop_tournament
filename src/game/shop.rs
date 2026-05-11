@@ -1,27 +1,22 @@
 use crate::game::data::*;
+use crate::game::rng::Rng;
 use crate::game::types::*;
-use rand::seq::SliceRandom;
-use rand::Rng;
 
-pub fn roll_shop() -> Shop {
-    let mut rng = rand::thread_rng();
+pub fn roll_shop(rng: &mut Rng) -> Shop {
     let chars: Vec<String> = character_defs().iter().map(|c| c.id.clone()).collect();
     let items: Vec<String> = item_defs().iter().map(|i| i.id.clone()).collect();
     let mut shop = Shop::default();
     for _ in 0..SHOP_CHAR_SLOTS {
-        shop.characters
-            .push(Some(chars.choose(&mut rng).cloned().unwrap()));
+        shop.characters.push(rng.choice(&chars).cloned());
     }
     for _ in 0..SHOP_ITEM_SLOTS {
-        shop.items
-            .push(Some(items.choose(&mut rng).cloned().unwrap()));
+        shop.items.push(rng.choice(&items).cloned());
     }
     shop
 }
 
 /// Generate an AI build for a target gold budget using light combat heuristics.
-pub fn ai_ladder_build(target_cost: i32) -> Build {
-    let mut rng = rand::thread_rng();
+pub fn ai_ladder_build(target_cost: i32, rng: &mut Rng) -> Build {
     let mut spent = 0;
     let mut team: Vec<TeamMember> = vec![];
     let chars: Vec<&CharacterDef> = character_defs().iter().collect();
@@ -38,7 +33,7 @@ pub fn ai_ladder_build(target_cost: i32) -> Build {
         }
 
         let needs_front = !team.iter().any(is_frontline_member);
-        let prefer_backline = !needs_front && rng.gen_bool(0.65);
+        let prefer_backline = !needs_front && rng.chance(0.65);
         let mut pool: Vec<&CharacterDef> = affordable
             .iter()
             .copied()
@@ -65,7 +60,7 @@ pub fn ai_ladder_build(target_cost: i32) -> Build {
         });
         pool.reverse();
         let pick_pool_len = pool.len().min(3);
-        let pick = pool[..pick_pool_len].choose(&mut rng).unwrap();
+        let pick = rng.choice(&pool[..pick_pool_len]).copied().unwrap();
         spent += pick.cost;
         team.push(TeamMember {
             def_id: pick.id.clone(),
@@ -78,13 +73,13 @@ pub fn ai_ladder_build(target_cost: i32) -> Build {
     }
 
     arrange_ai_team(&mut team);
-    equip_ai_items(&mut team, target_cost - spent, &mut rng);
+    equip_ai_items(&mut team, target_cost - spent, rng);
     arrange_ai_team(&mut team);
 
     Build { team }
 }
 
-fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut impl Rng) {
+fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut Rng) {
     if remaining <= 0 {
         return;
     }
@@ -110,8 +105,8 @@ fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut impl Rn
         candidates.sort_by_key(|(_, item, score)| (*score, item.cost));
         candidates.reverse();
         let pick_pool_len = candidates.len().min(3);
-        let (member_idx, item, _) = candidates[..pick_pool_len].choose(rng).unwrap();
-        equip_item(&mut team[*member_idx], item);
+        let (member_idx, item, _) = rng.choice(&candidates[..pick_pool_len]).copied().unwrap();
+        equip_item(&mut team[member_idx], item);
         remaining -= item.cost;
     }
 }
@@ -221,8 +216,9 @@ mod tests {
 
     #[test]
     fn ai_ladder_build_puts_backline_behind_frontline() {
-        for _ in 0..25 {
-            let build = ai_ladder_build(700);
+        for i in 0..25 {
+            let mut rng = Rng::new(0xA1B2_C3D4 ^ i as u32);
+            let build = ai_ladder_build(700, &mut rng);
             assert!(!build.team.is_empty());
 
             let first_backline = build.team.iter().position(|m| {

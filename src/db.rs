@@ -1,7 +1,7 @@
+use crate::game::rng::Rng;
 use crate::game::types::*;
 use anyhow::Result;
 use parking_lot::Mutex;
-use rand::seq::SliceRandom;
 use rusqlite::{params, Connection};
 use std::sync::Arc;
 
@@ -553,16 +553,20 @@ impl Db {
         &self,
         current_player_id: &str,
         target_cost: i32,
+        rng: &mut Rng,
     ) -> Result<Option<(String, String, String, Build, i32)>> {
         let conn = self.conn.lock();
         let down = ((target_cost as f32) * 0.15).ceil().max(1.0) as i32;
         let min_cost = (target_cost - down).max(1);
         let max_cost = target_cost;
+        // Stable ORDER BY so candidate ordering is independent of SQLite's
+        // execution plan — the rng pick must be reproducible from `(state, seed)`.
         let mut stmt = conn.prepare(
             "SELECT run_id, player_id, name, build_json, mmr_at_battle
              FROM battles
              WHERE player_id != ?1
-               AND cost_value BETWEEN ?2 AND ?3",
+               AND cost_value BETWEEN ?2 AND ?3
+             ORDER BY id",
         )?;
         let mut rows = stmt.query(params![current_player_id, min_cost, max_cost])?;
         let mut candidates: Vec<(String, String, String, Build, i32)> = vec![];
@@ -575,8 +579,7 @@ impl Db {
             let build: Build = serde_json::from_str(&bjson)?;
             candidates.push((run_id, player_id, name, build, mmr));
         }
-        let mut rng = rand::thread_rng();
-        Ok(candidates.choose(&mut rng).cloned())
+        Ok(rng.choice(&candidates).cloned())
     }
 
     pub fn player_mmr(&self, player_id: &str) -> Result<Option<i32>> {
@@ -1008,8 +1011,9 @@ mod tests {
         let mine = run_with_build("player-1", "me", one_member_build("orang"));
         db.insert_battle(&mine, BattleOutcome::Win).unwrap();
 
+        let mut rng = Rng::new(1);
         assert!(db
-            .find_opponent("player-1", mine.build.cost_value())
+            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
             .unwrap()
             .is_none());
 
@@ -1017,7 +1021,7 @@ mod tests {
         db.insert_battle(&other, BattleOutcome::Loss).unwrap();
 
         let found = db
-            .find_opponent("player-1", mine.build.cost_value())
+            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
             .unwrap()
             .unwrap();
         assert_eq!(found.1, "player-2"); // player_id
@@ -1028,8 +1032,9 @@ mod tests {
     fn find_opponent_returns_none_when_pool_is_empty() {
         let db = test_db();
         let mine = run_with_build("player-1", "me", one_member_build("orang"));
+        let mut rng = Rng::new(1);
         assert!(db
-            .find_opponent("player-1", mine.build.cost_value())
+            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
             .unwrap()
             .is_none());
     }
@@ -1041,8 +1046,9 @@ mod tests {
         let far = run_with_build("player-2", "far", three_member_build());
         db.insert_battle(&far, BattleOutcome::Win).unwrap();
         // far's cost is much higher than mine's — out of band.
+        let mut rng = Rng::new(1);
         assert!(db
-            .find_opponent("player-1", mine.build.cost_value())
+            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
             .unwrap()
             .is_none());
     }
@@ -1059,7 +1065,8 @@ mod tests {
         db.upsert_player_state(&hero).unwrap();
 
         let target = one_member_build("orang").cost_value();
-        let found = db.find_opponent("seeker", target).unwrap();
+        let mut rng = Rng::new(1);
+        let found = db.find_opponent("seeker", target, &mut rng).unwrap();
         assert!(found.is_some(), "expected to match the historical battle");
     }
 

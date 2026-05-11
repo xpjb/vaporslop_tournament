@@ -18,6 +18,12 @@ const LB_PAGE_SIZE = 25;
 const BGM_CROSSFADE_MS = 1000;
 const DEFAULT_AVATAR_ID = "meme_man";
 
+function requestedReplayIdFromUrl() {
+  const raw = new URLSearchParams(window.location.search).get("replay");
+  const replayId = Number.parseInt(raw || "", 10);
+  return Number.isInteger(replayId) && replayId > 0 ? replayId : null;
+}
+
 const state = {
   ws: null,
   defs: { characters: [], items: [] },
@@ -65,6 +71,11 @@ const state = {
     loading: false,
     pendingScroll: null, // "top" | "rank:<n>" | null
     open: false,
+  },
+  sharedReplay: {
+    requestedId: requestedReplayIdFromUrl(),
+    activeId: null,
+    loading: false,
   },
 };
 
@@ -136,6 +147,31 @@ async function postJson(url, body) {
   let data = null;
   try { data = await res.json(); } catch { /* may be empty */ }
   return { ok: res.ok, status: res.status, data };
+}
+
+function clearReplayQueryParam() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("replay");
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function replayShareUrl(replayId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("replay", String(replayId));
+  return url.toString();
+}
+
+async function fetchSharedReplay(replayId) {
+  try {
+    const res = await fetch(`/api/replay?battle_id=${encodeURIComponent(replayId)}`, {
+      credentials: "same-origin",
+    });
+    let data = null;
+    try { data = await res.json(); } catch { /* noop */ }
+    return { ok: res.ok, status: res.status, data };
+  } catch {
+    return { ok: false, status: 0, data: null };
+  }
 }
 
 async function registerAccount({ username, password }) {
@@ -683,6 +719,138 @@ function syncRunHudValues() {
   $("#hudMmr").textContent = r.mmr ?? "????";
 }
 
+function isSharedReplayActive() {
+  return !!state.sharedReplay.activeId;
+}
+
+function currentReplayId() {
+  const replayId = state.lastBattle?.replay_id;
+  return Number.isInteger(replayId) && replayId > 0 ? replayId : null;
+}
+
+function syncReplayLinkButtons() {
+  const replayId = currentReplayId();
+  $("#copyReplayLinkBtn")?.classList.toggle("hidden", !(replayId && !state.battleAnimating));
+  const hasGameOverReplay = !!(replayId && state.lastBattle?.events?.length);
+  $("#copyGoReplayLinkBtn")?.classList.toggle("hidden", !hasGameOverReplay);
+}
+
+function logSharedReplayResult(battleMsg) {
+  const log = (text) => {
+    const d = document.createElement("div");
+    d.textContent = text;
+    $("#battleLog").appendChild(d);
+    $("#battleLog").scrollTop = 1e9;
+  };
+  if (battleMsg.winner === 0) {
+    log(`✦ ${battleMsg.player_name || "left side"} wins`);
+  } else if (battleMsg.winner === 1) {
+    log(`✦ ${battleMsg.opponent_name || "right side"} wins`);
+  } else {
+    log("— draw —");
+  }
+}
+
+function finishSharedReplayPlayback(battleMsg) {
+  state.battleAnimating = false;
+  logSharedReplayResult(battleMsg);
+  $("#nextRoundBtn").textContent = "enter arcade";
+  $("#nextRoundBtn").classList.remove("hidden");
+  $("#replayBattleBtn").classList.remove("hidden");
+  syncReplayLinkButtons();
+}
+
+function openSharedReplay(battleMsg) {
+  state.sharedReplay.activeId = battleMsg.replay_id;
+  state.lastBattle = battleMsg;
+  state.run = null;
+  state.battleAnimating = true;
+  stopGameOverReplay();
+  $("#battleCanvas").__battleTooltipCleanup?.();
+  $("#battleLog").innerHTML = "";
+  renderIdentity($("#leftName"), battleMsg.player_name || "left side", battleMsg.player_mmr_before, battleMsg.player_avatar || DEFAULT_AVATAR_ID);
+  renderIdentity($("#rightName"), battleMsg.opponent_name || "right side", battleMsg.opponent_mmr_before, battleMsg.opponent_avatar || DEFAULT_AVATAR_ID);
+  $("#nextRoundBtn").classList.add("hidden");
+  $("#replayBattleBtn").classList.add("hidden");
+  syncReplayLinkButtons();
+  show("battle");
+  playBattle($("#battleCanvas"), battleMsg, charDef, itemDef, () => {
+    finishSharedReplayPlayback(battleMsg);
+  }, {
+    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
+    hideTooltipNow,
+  });
+  if (battleMsg.version_mismatch) {
+    flash("replay may differ slightly — combat rules changed since it was recorded", {
+      variant: "info",
+      duration: 4200,
+    });
+  }
+}
+
+function leaveSharedReplayMode() {
+  state.sharedReplay.requestedId = null;
+  state.sharedReplay.activeId = null;
+  state.sharedReplay.loading = false;
+  state.lastBattle = null;
+  state.battleAnimating = false;
+  clearReplayQueryParam();
+  $("#battleCanvas").__battleTooltipCleanup?.();
+  $("#battleLog").innerHTML = "";
+  $("#nextRoundBtn").textContent = "continue";
+  $("#nextRoundBtn").classList.add("hidden");
+  $("#replayBattleBtn").classList.add("hidden");
+  syncReplayLinkButtons();
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
+}
+
+async function copyCurrentReplayLink() {
+  const replayId = currentReplayId();
+  if (!replayId) return;
+  try {
+    await copyText(replayShareUrl(replayId));
+    flash("link copied", { variant: "info", duration: 1800 });
+  } catch {
+    flash("couldn't copy link", { variant: "error", duration: 2600 });
+  }
+}
+
+async function loadRequestedReplay() {
+  const replayId = state.sharedReplay.requestedId;
+  if (!replayId || state.sharedReplay.loading || state.sharedReplay.activeId) return false;
+  state.sharedReplay.loading = true;
+  const res = await fetchSharedReplay(replayId);
+  state.sharedReplay.loading = false;
+  if (!res.ok || !res.data) {
+    flash("replay not found", { variant: "error", duration: 2800 });
+    leaveSharedReplayMode();
+    if (state.auth.edgeCase) {
+      renderStartScreen();
+      show("start");
+    } else {
+      resumeRun(true);
+    }
+    return false;
+  }
+  openSharedReplay(res.data);
+  return true;
+}
+
 function showSessionReplacedBanner() {
   if (document.getElementById("sessionReplacedBanner")) return;
   const overlay = document.createElement("div");
@@ -751,6 +919,9 @@ function resumeRun(quiet = false) {
 }
 
 function startNewRun() {
+  if (state.sharedReplay.requestedId != null || state.sharedReplay.activeId != null) {
+    leaveSharedReplayMode();
+  }
   setNickname(state.profile.name || state.nickname, false);
   state.lastBattle = null;
   state.battleAnimating = false;
@@ -785,7 +956,9 @@ function handleServer(msg) {
       renderProfilePill();
       // Edge case present: don't auto-resume — server would just reject with auth_required.
       // The user has to log in first.
-      if (state.auth.edgeCase) {
+      if (state.sharedReplay.requestedId != null) {
+        loadRequestedReplay();
+      } else if (state.auth.edgeCase) {
         renderStartScreen();
       } else {
         resumeRun(true);
@@ -829,6 +1002,7 @@ function handleServer(msg) {
     case "battle":
       if (state.run && !isCurrentRunId(msg.run_id)) break;
       state.lastBattle = msg;
+      state.sharedReplay.activeId = null;
       const battleRunId = msg.run_id;
       // Keep pre-battle HUD values during replay; the post-battle snapshot is
       // applied only once the animation finishes so the result isn't spoiled.
@@ -862,8 +1036,10 @@ function handleServer(msg) {
       });
       $("#nextRoundBtn").classList.add("hidden");
       $("#replayBattleBtn").classList.add("hidden");
+      $("#nextRoundBtn").textContent = "continue";
       $("#battleLog").innerHTML = "";
       state.battleAnimating = true;
+      syncReplayLinkButtons();
       playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
         if (!isCurrentRunId(battleRunId)) return;
         state.battleAnimating = false;
@@ -882,6 +1058,7 @@ function handleServer(msg) {
         if (state.run?.phase !== "game_over") {
           $("#nextRoundBtn").classList.remove("hidden");
           $("#replayBattleBtn").classList.remove("hidden");
+          syncReplayLinkButtons();
         } else {
           renderRun();
         }
@@ -1342,6 +1519,7 @@ function combatantTooltip(c) {
 }
 
 let flashTimer = null;
+let flashHideTimer = null;
 
 function pulseHudMoney() {
   const hm = $("#hudMoney");
@@ -1375,18 +1553,24 @@ function flash(text, opts = {}) {
   const el = $("#status");
   if (!el) return;
   const { variant = "info", duration = 2400, shakeMoney = false } = opts;
+  if (flashTimer) clearTimeout(flashTimer);
+  if (flashHideTimer) clearTimeout(flashHideTimer);
   el.textContent = text;
-  el.classList.remove("status--error", "status--info");
+  el.classList.remove("status--error", "status--info", "status--visible");
   el.classList.add(variant === "error" ? "status--error" : "status--info");
   el.setAttribute("role", variant === "error" ? "alert" : "status");
   el.setAttribute("aria-live", variant === "error" ? "assertive" : "polite");
   if (shakeMoney) pulseHudMoney();
-  if (flashTimer) clearTimeout(flashTimer);
+  requestAnimationFrame(() => el.classList.add("status--visible"));
   flashTimer = setTimeout(() => {
-    el.textContent = "";
-    el.classList.remove("status--error", "status--info");
-    el.setAttribute("role", "status");
-    el.setAttribute("aria-live", "polite");
+    el.classList.remove("status--visible");
+    flashHideTimer = setTimeout(() => {
+      el.textContent = "";
+      el.classList.remove("status--error", "status--info");
+      el.setAttribute("role", "status");
+      el.setAttribute("aria-live", "polite");
+      flashHideTimer = null;
+    }, 200);
     flashTimer = null;
   }, duration);
 }
@@ -1557,9 +1741,11 @@ function populateGameOver(r, battleMsg) {
 
   const wrap = $("#goReplayWrap");
   const replayBtn = $("#goReplayBtn");
+  const copyBtn = $("#copyGoReplayLinkBtn");
   if (battleMsg && battleMsg.events && battleMsg.events.length) {
     wrap.classList.remove("hidden");
     replayBtn?.classList.remove("hidden");
+    copyBtn?.classList.toggle("hidden", !battleMsg.replay_id);
     renderIdentity($("#goLeftName"), r.name ?? "you", battleMsg.player_mmr_before, battleMsg.player_avatar || state.profile.selected_avatar);
     renderIdentity($("#goRightName"), battleMsg.opponent_name, battleMsg.opponent_mmr_before, battleMsg.opponent_avatar || DEFAULT_AVATAR_ID, {
       unknownMmr: battleMsg.opponent_mmr_before == null,
@@ -1576,6 +1762,7 @@ function populateGameOver(r, battleMsg) {
   } else {
     wrap.classList.add("hidden");
     replayBtn?.classList.add("hidden");
+    copyBtn?.classList.add("hidden");
     state.gameOverReplayKey = null;
   }
 }
@@ -2123,7 +2310,19 @@ window.addEventListener("keydown", (e) => {
     closeLeaderboard();
   }
 });
-$("#nextRoundBtn").onclick = () => renderRun();
+$("#nextRoundBtn").onclick = () => {
+  if (isSharedReplayActive()) {
+    leaveSharedReplayMode();
+    show("start");
+    if (state.auth.edgeCase) {
+      renderStartScreen();
+    } else {
+      resumeRun(true);
+    }
+    return;
+  }
+  renderRun();
+};
 $("#replayBattleBtn").onclick = () => {
   if (!state.lastBattle || state.battleAnimating) return;
   $("#battleCanvas").__battleTooltipCleanup?.();
@@ -2131,17 +2330,26 @@ $("#replayBattleBtn").onclick = () => {
   state.battleAnimating = true;
   $("#nextRoundBtn").classList.add("hidden");
   $("#replayBattleBtn").classList.add("hidden");
+  syncReplayLinkButtons();
   const msg = state.lastBattle;
   playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
+    if (isSharedReplayActive()) {
+      finishSharedReplayPlayback(msg);
+      return;
+    }
     state.battleAnimating = false;
     if (state.run?.phase !== "game_over") {
       $("#nextRoundBtn").classList.remove("hidden");
       $("#replayBattleBtn").classList.remove("hidden");
+      syncReplayLinkButtons();
     }
   }, {
     showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
     hideTooltipNow,
   });
+};
+$("#copyReplayLinkBtn").onclick = () => {
+  copyCurrentReplayLink();
 };
 $("#goReplayBtn").onclick = () => {
   if (!state.lastBattle) return;
@@ -2155,7 +2363,11 @@ $("#goReplayBtn").onclick = () => {
     loop: true,
   });
 };
+$("#copyGoReplayLinkBtn").onclick = () => {
+  copyCurrentReplayLink();
+};
 $("#goRestart").onclick = () => {
+  leaveSharedReplayMode();
   state.lastBattle = null;
   state.battleAnimating = false;
   startNewRun();

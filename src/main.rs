@@ -211,6 +211,7 @@ enum ServerMsg {
     },
     Battle {
         run_id: String,
+        replay_id: Option<i64>,
         opponent_name: String,
         player_avatar: String,
         opponent_avatar: String,
@@ -264,6 +265,21 @@ struct LbEntry {
     avatar: String,
     wins: i32,
     mmr: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplayPayload {
+    replay_id: i64,
+    player_name: String,
+    opponent_name: String,
+    player_avatar: String,
+    opponent_avatar: String,
+    player_mmr_before: i32,
+    opponent_mmr_before: i32,
+    events: Vec<game::combat::CombatEvent>,
+    winner: Option<u8>,
+    created_at: i64,
+    version_mismatch: bool,
 }
 
 const DEFAULT_LEADERBOARD_PAGE_SIZE: usize = 10;
@@ -375,6 +391,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/whoami", get(whoami_handler))
+        .route("/api/replay", get(replay_handler))
         .route("/api/register", post(register_handler))
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
@@ -701,7 +718,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                         let is_battle = matches!(&other, ClientMsg::Battle);
                         let result = handle_run_action(&state, &mut run, other).await;
                         match result {
-                            Ok(extra) => {
+                            Ok(mut extra) => {
                                 let save_result = if is_battle {
                                     let (update_mmr, outcome, combat_seed, enemy_opponent_id, player_mmr_before) =
                                         match &extra {
@@ -733,17 +750,25 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                         player_mmr_before,
                                     )
                                 } else {
-                                    state.db.upsert_player_state(&run)
+                                    state.db.upsert_player_state(&run).map(|_| None)
                                 };
-                                if let Err(e) = save_result {
-                                    send(
-                                        &mut socket,
-                                        &ServerMsg::Error {
-                                            message: e.to_string(),
-                                        },
-                                    )
-                                    .await;
-                                    continue;
+                                let replay_id = match save_result {
+                                    Ok(id) => id,
+                                    Err(e) => {
+                                        send(
+                                            &mut socket,
+                                            &ServerMsg::Error {
+                                                message: e.to_string(),
+                                            },
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                };
+                                if let Some(ServerMsg::Battle { replay_id: slot, .. }) =
+                                    extra.as_mut()
+                                {
+                                    *slot = replay_id;
                                 }
                                 if is_battle {
                                     if let Ok(profile) = state.db.ensure_player_profile(&run.player_id, &run.name) {
@@ -1091,6 +1116,7 @@ async fn handle_run_action(
             }
             Ok(Some(ServerMsg::Battle {
                 run_id: run.id.clone(),
+                replay_id: None,
                 opponent_name: op_name,
                 player_avatar,
                 opponent_avatar,
@@ -1318,6 +1344,85 @@ async fn whoami_handler(
         display_name,
         avatar,
         signed_in,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayQuery {
+    battle_id: i64,
+}
+
+async fn replay_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ReplayQuery>,
+) -> axum::response::Response {
+    let replay = match state.db.replay_record(q.battle_id) {
+        Ok(Some(replay)) => replay,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "replay_not_found" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("replay_record: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "server_error" })),
+            )
+                .into_response();
+        }
+    };
+    let player_name = state
+        .db
+        .profile_name(&replay.player_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anon".to_string());
+    let opponent_name = state
+        .db
+        .profile_name(&replay.enemy_player_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anon".to_string());
+    let player_avatar = state
+        .db
+        .profile_avatar(&replay.player_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
+    let opponent_avatar = state
+        .db
+        .profile_avatar(&replay.enemy_player_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
+    let mut combat_rng = Rng::new(replay.combat_seed);
+    let battle = resolve_battle(&replay.player_build, &replay.enemy_build, &mut combat_rng);
+    let recorded_winner = match replay.outcome {
+        BattleOutcome::Win => Some(0),
+        BattleOutcome::Loss => Some(1),
+        BattleOutcome::Draw => None,
+    };
+    let version_mismatch = replay.version_hash != game::VERSION_HASH;
+    Json(ReplayPayload {
+        replay_id: replay.id,
+        player_name,
+        opponent_name,
+        player_avatar,
+        opponent_avatar,
+        player_mmr_before: replay.player_mmr_before,
+        opponent_mmr_before: replay.enemy_mmr_before,
+        events: battle.events,
+        winner: if version_mismatch {
+            recorded_winner
+        } else {
+            battle.winner
+        },
+        created_at: replay.created_at,
+        version_mismatch,
     })
     .into_response()
 }

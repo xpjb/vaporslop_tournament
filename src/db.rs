@@ -38,13 +38,37 @@ pub enum BattleOutcome {
 }
 
 impl BattleOutcome {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             BattleOutcome::Win => "win",
             BattleOutcome::Loss => "loss",
             BattleOutcome::Draw => "draw",
         }
     }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "win" => Some(BattleOutcome::Win),
+            "loss" => Some(BattleOutcome::Loss),
+            "draw" => Some(BattleOutcome::Draw),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayRecord {
+    pub id: i64,
+    pub player_id: String,
+    pub enemy_player_id: String,
+    pub player_build: Build,
+    pub enemy_build: Build,
+    pub player_mmr_before: i32,
+    pub enemy_mmr_before: i32,
+    pub combat_seed: u32,
+    pub version_hash: u32,
+    pub outcome: BattleOutcome,
+    pub created_at: i64,
 }
 
 impl Db {
@@ -609,7 +633,7 @@ impl Db {
         enemy_opponent_id: Option<i64>,
         combat_seed: u32,
         player_mmr_before: i32,
-    ) -> Result<()> {
+    ) -> Result<Option<i64>> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         record_profile_progress_on(
@@ -630,11 +654,19 @@ impl Db {
         )?;
         upsert_player_state_on(&tx, run)?;
         let player_opponent_id = insert_opponent_on(&tx, run)?;
+        let mut replay_id = None;
         if let (Some(player_id), Some(enemy_id)) = (player_opponent_id, enemy_opponent_id) {
-            insert_battle_on(&tx, player_id, enemy_id, combat_seed, result, player_mmr_before)?;
+            replay_id = Some(insert_battle_on(
+                &tx,
+                player_id,
+                enemy_id,
+                combat_seed,
+                result,
+                player_mmr_before,
+            )?);
         }
         tx.commit()?;
-        Ok(())
+        Ok(replay_id)
     }
 
     /// Pick another player's historical snapshot whose cost is near `target_cost`.
@@ -682,6 +714,50 @@ impl Db {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn replay_record(&self, battle_id: i64) -> Result<Option<ReplayRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT b.id,
+                    p.player_id,
+                    e.player_id,
+                    p.build_json,
+                    e.build_json,
+                    b.player_mmr_before,
+                    e.mmr_at_snapshot,
+                    b.combat_seed,
+                    b.version_hash,
+                    b.outcome,
+                    b.created_at
+             FROM battles b
+             JOIN opponents p ON p.id = b.player_opponent_id
+             JOIN opponents e ON e.id = b.enemy_opponent_id
+             WHERE b.id = ?1",
+        )?;
+        let mut rows = stmt.query([battle_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let player_build_json: String = row.get(3)?;
+        let enemy_build_json: String = row.get(4)?;
+        let outcome_raw: String = row.get(9)?;
+        let Some(outcome) = BattleOutcome::from_str(&outcome_raw) else {
+            anyhow::bail!("unknown battle outcome: {outcome_raw}");
+        };
+        Ok(Some(ReplayRecord {
+            id: row.get(0)?,
+            player_id: row.get(1)?,
+            enemy_player_id: row.get(2)?,
+            player_build: serde_json::from_str(&player_build_json)?,
+            enemy_build: serde_json::from_str(&enemy_build_json)?,
+            player_mmr_before: row.get(5)?,
+            enemy_mmr_before: row.get(6)?,
+            combat_seed: row.get(7)?,
+            version_hash: row.get(8)?,
+            outcome,
+            created_at: row.get(10)?,
+        }))
     }
 
     #[cfg(test)]
@@ -981,7 +1057,7 @@ fn insert_battle_on(
     combat_seed: u32,
     outcome: BattleOutcome,
     player_mmr_before: i32,
-) -> Result<()> {
+) -> Result<i64> {
     conn.execute(
         "INSERT INTO battles(player_opponent_id, enemy_opponent_id, combat_seed, version_hash,
                              outcome, player_mmr_before, created_at)
@@ -995,7 +1071,7 @@ fn insert_battle_on(
             player_mmr_before,
         ],
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 fn record_score_on(
@@ -1201,8 +1277,10 @@ mod tests {
         let mut run = run_with_build("p1", "p1", one_member_build("orang"));
         run.wins = 1;
         run.best_streak = 1;
-        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr)
+        let replay_id = db
+            .record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr)
             .unwrap();
+        assert_eq!(replay_id, None);
         let conn = db.conn.lock();
         let opponents: i64 = conn
             .query_row("SELECT COUNT(*) FROM opponents", [], |r| r.get(0))
@@ -1227,16 +1305,18 @@ mod tests {
         me.best_streak = 1;
         let combat_seed: u32 = 0xCAFE_BABE;
         let player_mmr_before = me.mmr - 16; // simulate post-battle delta
-        db.record_battle_and_save_state(
-            &me,
-            BattleOutcome::Win,
-            true,
-            false,
-            Some(enemy_opponent_id),
-            combat_seed,
-            player_mmr_before,
-        )
-        .unwrap();
+        let replay_id = db
+            .record_battle_and_save_state(
+                &me,
+                BattleOutcome::Win,
+                true,
+                false,
+                Some(enemy_opponent_id),
+                combat_seed,
+                player_mmr_before,
+            )
+            .unwrap()
+            .expect("real opponent battle should create replay row");
 
         let conn = db.conn.lock();
         let (seed, outcome, mmr_before, version, p_op, e_op): (u32, String, i32, u32, i64, i64) =
@@ -1263,6 +1343,18 @@ mod tests {
         assert_eq!(version, crate::game::VERSION_HASH);
         assert_eq!(e_op, enemy_opponent_id);
         assert_ne!(p_op, enemy_opponent_id); // player's snapshot is a fresh row
+
+        let replay = db.replay_record(replay_id).unwrap().expect("replay must load");
+        assert_eq!(replay.id, replay_id);
+        assert_eq!(replay.player_id, "me");
+        assert_eq!(replay.enemy_player_id, "enemy");
+        assert_eq!(replay.player_mmr_before, player_mmr_before);
+        assert_eq!(replay.enemy_mmr_before, enemy.mmr);
+        assert_eq!(replay.combat_seed, combat_seed);
+        assert_eq!(replay.version_hash, crate::game::VERSION_HASH);
+        assert_eq!(replay.outcome.as_str(), "win");
+        assert_eq!(replay.player_build.team.len(), 1);
+        assert_eq!(replay.enemy_build.team.len(), 1);
     }
 
     #[test]

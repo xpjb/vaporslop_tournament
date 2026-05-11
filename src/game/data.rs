@@ -15,6 +15,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             wisdom: 10,
             hp: 50,
             properties: vec![],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "picardia".into(),
@@ -26,6 +27,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             wisdom: 5,
             hp: 25,
             properties: vec![],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "omniscronchulon".into(),
@@ -37,6 +39,19 @@ fn build_character_defs() -> Vec<CharacterDef> {
             wisdom: 5,
             hp: 25,
             properties: vec![MeleeCleave { count: 2 }],
+            hand_slots: 2,
+        },
+        CharacterDef {
+            id: "omegascronchulon".into(),
+            name: "Omegascronchulon".into(),
+            sprite: "omegascronchulon.webp".into(),
+            cost: 160,
+            might: 12,
+            reflexes: 15,
+            wisdom: 5,
+            hp: 25,
+            properties: vec![],
+            hand_slots: 4,
         },
         CharacterDef {
             id: "azul_picardia".into(),
@@ -50,6 +65,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![FreezeOnHit {
                 sprite: "ice.webp".into(),
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "lemen".into(),
@@ -63,6 +79,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![Ranged {
                 projectile: "lemon.webp".into(),
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "elephoont".into(),
@@ -79,6 +96,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
                 wisdom: 3,
                 hp: 3,
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "isoceles".into(),
@@ -92,6 +110,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![Ranged {
                 projectile: "octahedron.webp".into(),
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "vegetal".into(),
@@ -105,6 +124,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![SummonOnEnemyDeath {
                 species: "vegetal".into(),
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "dark_vegetal".into(),
@@ -118,6 +138,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![SummonOnAllyDeath {
                 species: "dark_vegetal".into(),
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "redchilli".into(),
@@ -131,17 +152,19 @@ fn build_character_defs() -> Vec<CharacterDef> {
             properties: vec![DamageEnemyOnDeath {
                 might_multiplier: 2,
             }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "greenchilli".into(),
             name: "Green Chilli".into(),
             sprite: "greenchilli.webp".into(),
-            cost: 70,
+            cost: 90,
             might: 10,
             reflexes: 10,
             wisdom: 5,
             hp: 20,
             properties: vec![TeamStatsOnDeath { amount: 3 }],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "orang".into(),
@@ -153,6 +176,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             wisdom: 10,
             hp: 80,
             properties: vec![],
+            hand_slots: 2,
         },
         CharacterDef {
             id: "gren".into(),
@@ -164,6 +188,7 @@ fn build_character_defs() -> Vec<CharacterDef> {
             wisdom: 10,
             hp: 60,
             properties: vec![Healer],
+            hand_slots: 2,
         },
     ]
 }
@@ -259,7 +284,7 @@ fn build_item_defs() -> Vec<ItemDef> {
             id: "hussar_hat".into(),
             name: "Hussar Hat".into(),
             sprite: "hathussar.png".into(),
-            cost: 100,
+            cost: 110,
             slot: GearSlot::Hat,
             properties: vec![Property::StatsOnAllyDeath {
                 might: 3,
@@ -282,9 +307,25 @@ fn build_item_defs() -> Vec<ItemDef> {
             }],
         },
         ItemDef {
+            id: "propellor_hat".into(),
+            name: "Propellor Hat".into(),
+            sprite: "propellor.png".into(),
+            cost: 100,
+            slot: GearSlot::Hat,
+            properties: vec![Property::ReviveAtBackOnce],
+        },
+        ItemDef {
+            id: "captains_hat".into(),
+            name: "Captain's Hat".into(),
+            sprite: "captainshat.png".into(),
+            cost: 50,
+            slot: GearSlot::Hat,
+            properties: vec![Property::StatsPerLivingAlly { amount: 1 }],
+        },
+        ItemDef {
             id: "pickle_rick".into(),
-            name: "Pickle Rick".into(),
-            sprite: "Pickle_rick_transparent_edgetrimmed.webp".into(),
+            name: "Hotdog Harry".into(),
+            sprite: "hotdog_harry.png".into(),
             cost: 40,
             slot: GearSlot::Hand,
             properties: vec![Property::StatBonus {
@@ -292,6 +333,19 @@ fn build_item_defs() -> Vec<ItemDef> {
                 reflexes: 0,
                 wisdom: 0,
                 hp: 0,
+            }],
+        },
+        ItemDef {
+            id: "bread".into(),
+            name: "Bread".into(),
+            sprite: "bread.webp".into(),
+            cost: 30,
+            slot: GearSlot::Hand,
+            properties: vec![Property::StatBonus {
+                might: 0,
+                reflexes: 0,
+                wisdom: 0,
+                hp: 20,
             }],
         },
         ItemDef {
@@ -377,7 +431,7 @@ fn build_item_defs() -> Vec<ItemDef> {
             id: "fishstick".into(),
             name: "Fish Stick".into(),
             sprite: "fishstick.png".into(),
-            cost: 100,
+            cost: 50,
             slot: GearSlot::Hand,
             properties: vec![Property::DrainEnemyStatsOnHit { amount: 1 }],
         },

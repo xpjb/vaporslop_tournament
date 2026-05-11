@@ -293,8 +293,8 @@ fn profile_avatar_defs() -> Vec<ProfileAvatarDef> {
         profile_avatar("noggin", "Noggin", "Noggin.webp", 0, 10),
         profile_avatar(
             "pickle_rick",
-            "Pickle Rick",
-            "Pickle_rick_transparent_edgetrimmed.webp",
+            "Hotdog Harry",
+            "hotdog_harry.png",
             0,
             100,
         ),
@@ -822,6 +822,8 @@ async fn handle_run_action(
                     hat: None,
                     left_hand: None,
                     right_hand: None,
+                    hand_3: None,
+                    hand_4: None,
                 },
             );
             run.shop.characters[slot] = None;
@@ -854,12 +856,17 @@ async fn handle_run_action(
                     member.hat = Some(id);
                 }
                 GearSlot::Hand => {
-                    if member.left_hand.is_none() {
-                        member.left_hand = Some(id);
-                    } else if member.right_hand.is_none() {
-                        member.right_hand = Some(id);
-                    } else {
-                        return Err("both hands full".into());
+                    let hand_count = character_def(&member.def_id)
+                        .map(|d| d.hand_slots)
+                        .unwrap_or(2) as usize;
+                    let target_slot = ItemSlot::HAND_SLOTS
+                        .iter()
+                        .take(hand_count)
+                        .find(|s| member.hand_slot(**s).is_none())
+                        .copied();
+                    match target_slot {
+                        Some(s) => *member.hand_slot_mut(s) = Some(id),
+                        None => return Err("all hands full".into()),
                     }
                 }
             }
@@ -893,6 +900,9 @@ async fn handle_run_action(
                 .team
                 .get_mut(target)
                 .ok_or("no such team member")?;
+            if !member_has_slot(member, target_slot) {
+                return Err("character lacks that slot".into());
+            }
             let dest = member_item_slot_mut(member, target_slot);
             if dest.is_some() {
                 return Err("item socket taken".into());
@@ -921,6 +931,9 @@ async fn handle_run_action(
             let item_slot = item_def(&item_id).ok_or("unknown item")?.slot;
             if !slot_accepts(to_slot, item_slot) {
                 return Err("wrong item socket".into());
+            }
+            if !member_has_slot(&run.build.team[to_team], to_slot) {
+                return Err("character lacks that slot".into());
             }
             if from_team == to_team && from_slot == to_slot {
                 return Ok(None);
@@ -1186,25 +1199,31 @@ fn synthetic_opponent_name() -> String {
 }
 
 fn member_item_slot(member: &TeamMember, slot: ItemSlot) -> &Option<String> {
-    match slot {
-        ItemSlot::Hat => &member.hat,
-        ItemSlot::LeftHand => &member.left_hand,
-        ItemSlot::RightHand => &member.right_hand,
-    }
+    member.hand_slot(slot)
 }
 
 fn member_item_slot_mut(member: &mut TeamMember, slot: ItemSlot) -> &mut Option<String> {
-    match slot {
-        ItemSlot::Hat => &mut member.hat,
-        ItemSlot::LeftHand => &mut member.left_hand,
-        ItemSlot::RightHand => &mut member.right_hand,
-    }
+    member.hand_slot_mut(slot)
 }
 
 fn slot_accepts(target: ItemSlot, item: GearSlot) -> bool {
     match item {
         GearSlot::Hat => target == ItemSlot::Hat,
-        GearSlot::Hand => target == ItemSlot::LeftHand || target == ItemSlot::RightHand,
+        GearSlot::Hand => matches!(
+            target,
+            ItemSlot::LeftHand | ItemSlot::RightHand | ItemSlot::Hand3 | ItemSlot::Hand4
+        ),
+    }
+}
+
+fn member_has_slot(member: &TeamMember, slot: ItemSlot) -> bool {
+    let hand_count = character_def(&member.def_id)
+        .map(|d| d.hand_slots)
+        .unwrap_or(2);
+    match slot {
+        ItemSlot::Hat | ItemSlot::LeftHand | ItemSlot::RightHand => true,
+        ItemSlot::Hand3 => hand_count >= 3,
+        ItemSlot::Hand4 => hand_count >= 4,
     }
 }
 

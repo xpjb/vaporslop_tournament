@@ -914,11 +914,17 @@ function renderIdentity(el, name, mmr, avatarId, opts = {}) {
 }
 const charDef = (id) => state.defs.characters.find(c => c.id === id);
 const itemDef = (id) => state.defs.items.find(i => i.id === id);
-const SOCKETS = [
-  { key: "hat", label: "hat" },
-  { key: "left_hand", label: "left" },
-  { key: "right_hand", label: "right" },
-];
+const HAND_SLOT_KEYS = ["left_hand", "right_hand", "hand_3", "hand_4"];
+const HAND_SLOT_LABELS = { left_hand: "left", right_hand: "right", hand_3: "3rd", hand_4: "4th" };
+function memberHandSlots(member) {
+  const cd = member ? charDef(member.def_id) : null;
+  const n = cd?.hand_slots ?? 2;
+  return HAND_SLOT_KEYS.slice(0, n);
+}
+function memberSockets(member) {
+  const hands = memberHandSlots(member);
+  return [{ key: "hat", label: "hat" }, ...hands.map(k => ({ key: k, label: HAND_SLOT_LABELS[k] }))];
+}
 const STAT_KEYS = [
   { key: "might", label: "might" },
   { key: "reflexes", label: "reflexes" },
@@ -1067,7 +1073,7 @@ function statParts(p) {
 }
 
 function memberItems(member) {
-  return SOCKETS
+  return memberSockets(member)
     .map(({ key }) => ({ key, item: member?.[key] ? itemDef(member[key]) : null }))
     .filter(({ item }) => item);
 }
@@ -1112,6 +1118,11 @@ function propertyText(p) {
     }
     case "crit_strike": return `${escape(String(p.chance_percent))}% critical strike (double damage)`;
     case "revive_once": return "revive once at full HP";
+    case "revive_at_back_once": return "revive once at full HP at the back of formation";
+    case "stats_per_living_ally": {
+      const n = Number(p.amount) || 0;
+      return `+${escape(String(n))} to all stats per other living ally`;
+    }
     case "melee_cleave": {
       const n = Number(p.count);
       return `melee hits front ${escape(String(n))} enemies`;
@@ -1232,6 +1243,22 @@ function formationFrontAuraTooltipSection(c) {
     <div class="tooltip-hint">From living allies that buff your front slot.</div>`;
 }
 
+function perAllyAuraTooltipSection(c) {
+  const m = c.applied_per_ally_might || 0;
+  const r = c.applied_per_ally_reflexes || 0;
+  const w = c.applied_per_ally_wisdom || 0;
+  const hpBonus = c.per_ally_hp_bonus || 0;
+  if (!m && !r && !w && !hpBonus) return "";
+  const parts = [];
+  if (m) parts.push(`might ${signed(m)}`);
+  if (r) parts.push(`reflexes ${signed(r)}`);
+  if (w) parts.push(`wisdom ${signed(w)}`);
+  if (hpBonus) parts.push(`max HP ${signed(hpBonus)}`);
+  return `<div class="tooltip-section">per-ally aura</div>
+    <div class="tooltip-aura-line">${parts.join(" · ")}</div>
+    <div class="tooltip-hint">Scales with the number of other living allies.</div>`;
+}
+
 function enemyAuraTooltipSection(c) {
   const reflexDebuff = c.applied_enemy_reflex_debuff || 0;
   if (!reflexDebuff) return "";
@@ -1242,7 +1269,7 @@ function enemyAuraTooltipSection(c) {
 
 function combatantTooltip(c) {
   const cd = charDef(c.def_id);
-  const effMaxHp = (c.max_hp || 0) + (c.formation_hp_bonus || 0);
+  const effMaxHp = (c.max_hp || 0) + (c.formation_hp_bonus || 0) + (c.per_ally_hp_bonus || 0);
   const base = cd ? Object.fromEntries(STAT_KEYS.map(({ key }) => [key, cd[key] || 0])) : {
     might: c.might || 0,
     reflexes: c.reflexes || 0,
@@ -1259,6 +1286,8 @@ function combatantTooltip(c) {
     ["hat", c.hat_id],
     ["left hand", c.left_hand_id],
     ["right hand", c.right_hand_id],
+    ["3rd hand", c.hand_3_id],
+    ["4th hand", c.hand_4_id],
   ].filter(([, id]) => id);
   const itemRows = itemIds.length
     ? itemIds.map(([slot, id]) => {
@@ -1272,8 +1301,10 @@ function combatantTooltip(c) {
     ${statGrid(base, total, Math.max(0, c.hp || 0))}
     ${armourTotalSectionHtml(c.properties || [])}
     ${formationFrontAuraTooltipSection(c)}
+    ${perAllyAuraTooltipSection(c)}
     ${enemyAuraTooltipSection(c)}
   ${c.revive_charges ? `<div class="tooltip-section">resurrection</div><div>${escape(String(c.revive_charges))} charge${c.revive_charges === 1 ? "" : "s"} remaining</div>` : ""}
+  ${c.revive_at_back_charges ? `<div class="tooltip-section">propellor revive</div><div>${escape(String(c.revive_at_back_charges))} charge${c.revive_at_back_charges === 1 ? "" : "s"} remaining</div>` : ""}
   ${(c.max_mana || 0) > 0 ? `<div class="tooltip-section">mana</div><div>${escape(String(Math.max(0, c.mana ?? 0)))} / ${escape(String(c.max_mana))}</div>` : ""}
     <div class="tooltip-section">unit properties</div>
     ${propertyList(cd?.properties || [])}
@@ -1598,20 +1629,20 @@ function itemSocketId(slot) {
   if (slot === "hat") return "hat";
   return "hand";
 }
+const HAND_SLOT_SET = new Set(HAND_SLOT_KEYS);
+function isHandSlot(slot) { return slot === "hand" || HAND_SLOT_SET.has(slot); }
 function slotAccepts(targetSlot, itemSlot) {
   if (itemSlot === "hat") return targetSlot === "hat";
-  if (itemSlot === "hand") return targetSlot === "left_hand" || targetSlot === "right_hand";
-  if (itemSlot === "left_hand" || itemSlot === "right_hand") {
-    return targetSlot === "left_hand" || targetSlot === "right_hand";
-  }
+  if (isHandSlot(itemSlot)) return HAND_SLOT_SET.has(targetSlot);
   return false;
 }
 function firstFreeSlot(member, itemSlot) {
   if (!member) return null;
   if (itemSlot === "hat") return member.hat ? null : "hat";
-  if (itemSlot === "hand" || itemSlot === "left_hand" || itemSlot === "right_hand") {
-    if (!member.left_hand) return "left_hand";
-    if (!member.right_hand) return "right_hand";
+  if (isHandSlot(itemSlot)) {
+    for (const k of memberHandSlots(member)) {
+      if (!member[k]) return k;
+    }
     return null;
   }
   return null;
@@ -1628,7 +1659,7 @@ function canSwapTeamItem(data, target, targetSlot) {
 function renderItemSockets(teamIdx, member) {
   const sockets = document.createElement("div");
   sockets.className = "item-sockets";
-  SOCKETS.forEach(({ key, label }) => {
+  memberSockets(member).forEach(({ key, label }) => {
     const itemId = member[key];
     const socket = document.createElement("div");
     socket.className = "item-socket" + (itemId ? " filled" : "");

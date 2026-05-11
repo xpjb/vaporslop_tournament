@@ -61,6 +61,12 @@ pub enum Property {
     },
     /// Once per battle, when HP reaches 0, revive at full effective HP (charges tracked at runtime).
     ReviveOnce,
+    /// Once per battle, when HP reaches 0, revive at full HP and reposition to the back of the formation.
+    ReviveAtBackOnce,
+    /// While alive, wearer gains `amount` to all stats per *other* living ally on their side.
+    StatsPerLivingAlly {
+        amount: i32,
+    },
     /// Melee only: hit the first `count` living enemies in formation order per swing.
     MeleeCleave {
         count: u8,
@@ -98,7 +104,7 @@ pub enum Property {
     },
 }
 
-/// Where an item may be equipped (character still has two distinct hand sockets).
+/// Where an item may be equipped. Hand items go into any free hand slot.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GearSlot {
@@ -112,6 +118,21 @@ pub enum ItemSlot {
     Hat,
     LeftHand,
     RightHand,
+    Hand3,
+    Hand4,
+}
+
+impl ItemSlot {
+    pub const HAND_SLOTS: [ItemSlot; 4] = [
+        ItemSlot::LeftHand,
+        ItemSlot::RightHand,
+        ItemSlot::Hand3,
+        ItemSlot::Hand4,
+    ];
+}
+
+fn default_hand_slots() -> u8 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +146,8 @@ pub struct CharacterDef {
     pub wisdom: i32,
     pub hp: i32,
     pub properties: Vec<Property>,
+    #[serde(default = "default_hand_slots")]
+    pub hand_slots: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +185,10 @@ pub struct TeamMember {
     pub hat: Option<String>,        // item id
     pub left_hand: Option<String>,  // item id
     pub right_hand: Option<String>, // item id
+    #[serde(default)]
+    pub hand_3: Option<String>,
+    #[serde(default)]
+    pub hand_4: Option<String>,
 }
 
 impl TeamMember {
@@ -170,6 +197,28 @@ impl TeamMember {
             .iter()
             .chain(self.left_hand.iter())
             .chain(self.right_hand.iter())
+            .chain(self.hand_3.iter())
+            .chain(self.hand_4.iter())
+    }
+
+    pub fn hand_slot(&self, slot: ItemSlot) -> &Option<String> {
+        match slot {
+            ItemSlot::LeftHand => &self.left_hand,
+            ItemSlot::RightHand => &self.right_hand,
+            ItemSlot::Hand3 => &self.hand_3,
+            ItemSlot::Hand4 => &self.hand_4,
+            ItemSlot::Hat => &self.hat,
+        }
+    }
+
+    pub fn hand_slot_mut(&mut self, slot: ItemSlot) -> &mut Option<String> {
+        match slot {
+            ItemSlot::LeftHand => &mut self.left_hand,
+            ItemSlot::RightHand => &mut self.right_hand,
+            ItemSlot::Hand3 => &mut self.hand_3,
+            ItemSlot::Hand4 => &mut self.hand_4,
+            ItemSlot::Hat => &mut self.hat,
+        }
     }
 }
 

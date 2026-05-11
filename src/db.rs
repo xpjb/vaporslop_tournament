@@ -963,6 +963,8 @@ mod tests {
                 hat: None,
                 left_hand: None,
                 right_hand: None,
+                hand_3: None,
+                hand_4: None,
             }],
         }
     }
@@ -975,18 +977,24 @@ mod tests {
                     hat: None,
                     left_hand: None,
                     right_hand: None,
+                    hand_3: None,
+                    hand_4: None,
                 },
                 TeamMember {
                     def_id: "dark_vegetal".to_string(),
                     hat: None,
                     left_hand: None,
                     right_hand: None,
+                    hand_3: None,
+                    hand_4: None,
                 },
                 TeamMember {
                     def_id: "meme_man".to_string(),
                     hat: None,
                     left_hand: None,
                     right_hand: None,
+                    hand_3: None,
+                    hand_4: None,
                 },
             ],
         }

@@ -24,22 +24,35 @@ class Sprite {
     this.hat = c.hat_sprite;
     this.left_hand = c.left_hand_sprite;
     this.right_hand = c.right_hand_sprite;
+    this.hand_3 = c.hand_3_sprite;
+    this.hand_4 = c.hand_4_sprite;
     this.hat_id = c.hat_id;
     this.left_hand_id = c.left_hand_id;
     this.right_hand_id = c.right_hand_id;
+    this.hand_3_id = c.hand_3_id;
+    this.hand_4_id = c.hand_4_id;
     this.max_hp = c.max_hp;
     this.formation_hp_bonus = c.formation_hp_bonus || 0;
+    this.per_ally_hp_bonus = c.per_ally_hp_bonus || 0;
     this.hp = c.hp;
     this.might = c.might;
     this.reflexes = c.reflexes;
     this.wisdom = c.wisdom;
     this.properties = c.properties || [];
     this.revive_charges = c.revive_charges ?? 0;
+    this.revive_at_back_charges = c.revive_at_back_charges ?? 0;
+    this.flightUntil = 0;
+    this.flightFrom = null;
+    this.flightDuration = 0;
+    this.flightHeight = 0;
     this.mana = c.mana ?? 0;
     this.max_mana = c.max_mana ?? 0;
     this.applied_front_might = c.applied_front_might ?? 0;
     this.applied_front_reflexes = c.applied_front_reflexes ?? 0;
     this.applied_front_wisdom = c.applied_front_wisdom ?? 0;
+    this.applied_per_ally_might = c.applied_per_ally_might ?? 0;
+    this.applied_per_ally_reflexes = c.applied_per_ally_reflexes ?? 0;
+    this.applied_per_ally_wisdom = c.applied_per_ally_wisdom ?? 0;
     this.applied_enemy_reflex_debuff = c.applied_enemy_reflex_debuff ?? 0;
     this.x = 0; this.y = FLOOR_Y;
     this.targetX = 0;
@@ -81,6 +94,16 @@ function drawSprite(ctx, s, t) {
   const w = 96, h = 96;
   let x = s.x;
   let y = s.y - h;
+  let flightProgress = 0;
+  let flying = false;
+  if (s.flightUntil > t && s.flightDuration > 0) {
+    flying = true;
+    flightProgress = clamp(1 - (s.flightUntil - t) / s.flightDuration, 0, 1);
+    y -= reviveAtBackArcLift(flightProgress) * s.flightHeight;
+  } else if (s.flightUntil) {
+    s.flightUntil = 0;
+    s.flightFrom = null;
+  }
   if (s.shake > 0) { x += (Math.random() - .5) * s.shake; y += (Math.random() - .5) * s.shake; }
   s.bounds = { x, y: y - 28, w, h: h + 34 };
   ctx.save();
@@ -88,7 +111,8 @@ function drawSprite(ctx, s, t) {
     (s.applied_front_might || 0) +
     (s.applied_front_reflexes || 0) +
     (s.applied_front_wisdom || 0) +
-    (s.formation_hp_bonus || 0);
+    (s.formation_hp_bonus || 0) +
+    (s.per_ally_hp_bonus || 0);
   if (auraAmt > 0) {
     const cx = x + w / 2;
     const cy = y + h / 2 - 10;
@@ -131,7 +155,19 @@ function drawSprite(ctx, s, t) {
   // hat
   if (s.hat) {
     const hi = img(s.hat);
-    if (hi.complete && hi.naturalWidth) ctx.drawImage(hi, x + 24, y - 28, 48, 48);
+    if (hi.complete && hi.naturalWidth) {
+      if (flying) {
+        const hx = x + 48;
+        const hy = y - 4;
+        ctx.save();
+        ctx.translate(hx, hy);
+        ctx.rotate(flightProgress * Math.PI * 14);
+        ctx.drawImage(hi, -28, -28, 56, 56);
+        ctx.restore();
+      } else {
+        ctx.drawImage(hi, x + 24, y - 28, 48, 48);
+      }
+    }
   }
   // left hand (drawn on the character's left = visually right when not flipped)
   if (s.left_hand) {
@@ -142,6 +178,16 @@ function drawSprite(ctx, s, t) {
   if (s.right_hand) {
     const wi = img(s.right_hand);
     if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 6, y + 24, 40, 40);
+  }
+  // 3rd hand (upper-left side, slightly above)
+  if (s.hand_3) {
+    const wi = img(s.hand_3);
+    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 50, y - 4, 36, 36);
+  }
+  // 4th hand (upper-right side, slightly above)
+  if (s.hand_4) {
+    const wi = img(s.hand_4);
+    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 10, y - 4, 36, 36);
   }
   ctx.restore();
 
@@ -164,7 +210,7 @@ function drawSprite(ctx, s, t) {
   const barX = x + (w - barW) / 2;
   const hpBarH = 5;
 
-  const effMax = Math.max(1, s.max_hp + (s.formation_hp_bonus || 0));
+  const effMax = Math.max(1, s.max_hp + (s.formation_hp_bonus || 0) + (s.per_ally_hp_bonus || 0));
   const pct = Math.max(0, s.hp) / effMax;
   const hpBarY = y - 32 - manaBarLift;
   const hpLblY = y - 37 - manaBarLift;
@@ -199,6 +245,16 @@ function drawProjectile(ctx, p) {
 }
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+/** revive_at_back arc: snaps up (linear over `snap`), then cosine ease back to floor */
+function reviveAtBackArcLift(progress, snapPortion = 0.065) {
+  const p = clamp(progress, 0, 1);
+  const snap = snapPortion;
+  if (p <= snap) return p / snap;
+  const fall = (p - snap) / Math.max(1e-6, 1 - snap);
+  return Math.cos(fall * Math.PI * 0.5);
+}
+
 const rand = (min, max) => min + Math.random() * (max - min);
 
 function createBattleAudio() {
@@ -355,7 +411,7 @@ function hitSprite(list, point) {
   return null;
 }
 
-const ATTACK_RESOLUTION_EVENTS = new Set(["hp", "revive", "freeze", "death", "death_blast", "stat_sync", "summon"]);
+const ATTACK_RESOLUTION_EVENTS = new Set(["hp", "revive", "revive_at_back", "freeze", "death", "death_blast", "stat_sync", "stat_drain", "summon"]);
 
 function isGroupedAttack(ev, group) {
   return ev?.type === "attack" && ev.simultaneous_group != null && ev.simultaneous_group === group;
@@ -444,7 +500,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   }
 
   function eventDelay(ev, now) {
-    const heavy = ev.type === "attack" || ev.type === "attack_batch" || ev.type === "death" || ev.type === "death_blast" || ev.type === "freeze" || ev.type === "revive";
+    const heavy = ev.type === "attack" || ev.type === "attack_batch" || ev.type === "death" || ev.type === "death_blast" || ev.type === "freeze" || ev.type === "revive" || ev.type === "revive_at_back";
     return (heavy ? 380 : 120) / playbackSpeed(now);
   }
 
@@ -466,7 +522,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     floaters.push({
       text,
       x: p.x + rand(-16, 16),
-      y: p.y + rand(-10, 8),
+      y: p.y + rand(-10, 8) + (opts.dy ?? 0),
       vx: opts.vx ?? rand(-0.18, 0.18),
       vy: opts.vy ?? -0.75,
       color: opts.color ?? "#fff36c",
@@ -700,6 +756,44 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         ev.resolutions.forEach(applyEvent);
         break;
       }
+      case "stat_drain": {
+        const s = spritesById.get(ev.uid);
+        if (s) {
+          const amt = Math.max(0, Number(ev.amount) || 0);
+          if (amt > 0) {
+            const now = performance.now();
+            s.flashUntil = Math.max(s.flashUntil || 0, now + scaledDuration(160, now));
+            const p = spriteAnchor(s);
+            emitFloater(s, `-${amt} ALL STATS`, {
+              color: "#7ec8e3",
+              stroke: "rgba(20, 40, 55, 0.92)",
+              size: amt > 9 ? 15 : 17,
+              ttl: 820,
+              vy: -0.58,
+            });
+            emitFloater(s, "might · reflex · wisdom · max HP", {
+              color: "rgba(200, 235, 248, 0.95)",
+              stroke: "rgba(12, 28, 38, 0.88)",
+              size: 11,
+              ttl: 780,
+              vy: -0.44,
+              dy: 16,
+            });
+            emitParticles(p.x, p.y + 4, 14, {
+              color: "#7ec8e3",
+              altColor: "#4af2ff",
+              minSpeed: 0.5,
+              maxSpeed: 2.4,
+              gravity: 0.02,
+              minSize: 2,
+              maxSize: 5,
+              glow: 10,
+            });
+            addShake(2);
+          }
+        }
+        break;
+      }
       case "stat_sync": {
         const s = spritesById.get(ev.uid);
         if (s) {
@@ -713,16 +807,21 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
             ev.applied_front_might === s.applied_front_might &&
             ev.applied_front_reflexes === s.applied_front_reflexes &&
             ev.applied_front_wisdom === s.applied_front_wisdom &&
-            (ev.formation_hp_bonus || 0) === (s.formation_hp_bonus || 0);
+            (ev.formation_hp_bonus || 0) === (s.formation_hp_bonus || 0) &&
+            (ev.per_ally_hp_bonus || 0) === (s.per_ally_hp_bonus || 0);
           s.might = ev.might;
           s.reflexes = ev.reflexes;
           s.wisdom = ev.wisdom;
           s.max_hp = ev.max_hp;
           s.hp = ev.hp;
           s.formation_hp_bonus = ev.formation_hp_bonus || 0;
+          s.per_ally_hp_bonus = ev.per_ally_hp_bonus || 0;
           s.applied_front_might = ev.applied_front_might ?? 0;
           s.applied_front_reflexes = ev.applied_front_reflexes ?? 0;
           s.applied_front_wisdom = ev.applied_front_wisdom ?? 0;
+          s.applied_per_ally_might = ev.applied_per_ally_might ?? 0;
+          s.applied_per_ally_reflexes = ev.applied_per_ally_reflexes ?? 0;
+          s.applied_per_ally_wisdom = ev.applied_per_ally_wisdom ?? 0;
           s.applied_enemy_reflex_debuff = ev.applied_enemy_reflex_debuff ?? 0;
           if (showActivation) {
             const label = positiveStats.every(n => n === positiveStats[0]) && positiveStats.length >= 3
@@ -838,6 +937,48 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
           layout(leftList, rightList, canvas);
         }
         log(`${s?.def_id ?? "?"} resurrects!`);
+        break;
+      }
+      case "revive_at_back": {
+        const s = spritesById.get(ev.uid);
+        if (s) {
+          const list = s.side === 0 ? leftList : rightList;
+          // Move to back of formation order so layout slots them last.
+          const idx = list.indexOf(s);
+          if (idx >= 0) {
+            list.splice(idx, 1);
+            list.push(s);
+          }
+          s.dead = false;
+          s.hp = ev.hp;
+          s.revive_at_back_charges = Math.max(0, (s.revive_at_back_charges || 0) - 1);
+          const now = performance.now();
+          const fromX = s.x;
+          const fromY = s.y;
+          layout(leftList, rightList, canvas);
+          // Layout updated targetX; keep current x so the tween + flight arc carries it back.
+          s.x = fromX;
+          s.flightFrom = { x: fromX, y: fromY };
+          s.flightDuration = scaledDuration(1350, now);
+          s.flightUntil = now + s.flightDuration;
+          s.flightHeight = 140;
+          s.flashUntil = now + scaledDuration(350, now);
+          emitStatus(s, "PROPELLOR!", "#fff36c");
+          const p = spriteAnchor(s);
+          emitParticles(p.x, p.y, 28, {
+            color: "#fff36c",
+            altColor: "#4af2ff",
+            minSpeed: 0.6,
+            maxSpeed: 3.4,
+            gravity: -0.02,
+            minSize: 2,
+            maxSize: 7,
+            glow: 18,
+          });
+          addShake(5);
+          audio.revive();
+        }
+        log(`${s?.def_id ?? "?"} zips to the back!`);
         break;
       }
       case "summon": {
@@ -978,7 +1119,28 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
 
     // smooth move sprites
     const moveRatio = motionRatio(0.12, dtScaled);
-    [...leftList, ...rightList].forEach(s => { s.x += (s.targetX - s.x) * moveRatio; });
+    const flightMoveRatio = motionRatio(0.055, dtScaled);
+    [...leftList, ...rightList].forEach(s => {
+      const flying = s.flightUntil > now && s.flightDuration > 0;
+      s.x += (s.targetX - s.x) * (flying ? flightMoveRatio : moveRatio);
+      if (flying) {
+        const progress = clamp(1 - (s.flightUntil - now) / s.flightDuration, 0, 1);
+        const trailY = s.y - 96 - reviveAtBackArcLift(progress) * (s.flightHeight || 0) + 24;
+        emitParticles(s.x + 48, trailY, 2, {
+          color: "#fff36c",
+          altColor: "#4af2ff",
+          minSpeed: 0.4,
+          maxSpeed: 1.6,
+          gravity: 0.02,
+          minSize: 2,
+          maxSize: 4,
+          glow: 10,
+          layer: "back",
+          minTtl: 220,
+          maxTtl: 420,
+        });
+      }
+    });
     updateParticles(dtScaled);
     updateFloaters(dtScaled);
     screenShake = Math.max(0, screenShake - dtScaled * 0.045);

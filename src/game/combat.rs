@@ -12,9 +12,17 @@ pub struct Combatant {
     pub hat_id: Option<String>,
     pub left_hand_id: Option<String>,
     pub right_hand_id: Option<String>,
+    #[serde(default)]
+    pub hand_3_id: Option<String>,
+    #[serde(default)]
+    pub hand_4_id: Option<String>,
     pub hat_sprite: Option<String>,
     pub left_hand_sprite: Option<String>,
     pub right_hand_sprite: Option<String>,
+    #[serde(default)]
+    pub hand_3_sprite: Option<String>,
+    #[serde(default)]
+    pub hand_4_sprite: Option<String>,
     /// Intrinsic max HP (def + gear); aura adds `formation_hp_bonus`.
     pub max_hp: i32,
     pub hp: i32,
@@ -37,6 +45,18 @@ pub struct Combatant {
     /// From gear (`ReviveOnce`); decremented when a revival triggers.
     #[serde(default)]
     pub revive_charges: u8,
+    /// From gear (`ReviveAtBackOnce`); decremented when this revival triggers.
+    #[serde(default)]
+    pub revive_at_back_charges: u8,
+    #[serde(default)]
+    pub applied_per_ally_might: i32,
+    #[serde(default)]
+    pub applied_per_ally_reflexes: i32,
+    #[serde(default)]
+    pub applied_per_ally_wisdom: i32,
+    /// Like `formation_hp_bonus`: extra HP cap from the per-ally aura. Included in `effective_max_hp`.
+    #[serde(default)]
+    pub per_ally_hp_bonus: i32,
     /// Healers (`Property::Healer`) start battle with [`HEALER_MAX_MANA`] and spend 1 per heal.
     #[serde(default)]
     pub mana: i32,
@@ -102,6 +122,11 @@ pub enum CombatEvent {
         uid: u32,
         hp: i32,
     },
+    /// Wearer of a propellor hat reaches 0 HP and zips to the back of formation at full HP.
+    ReviveAtBack {
+        uid: u32,
+        hp: i32,
+    },
     Summon {
         side: u8,
         summoner: u32,
@@ -124,6 +149,19 @@ pub enum CombatEvent {
         applied_front_wisdom: i32,
         #[serde(default)]
         applied_enemy_reflex_debuff: i32,
+        #[serde(default)]
+        per_ally_hp_bonus: i32,
+        #[serde(default)]
+        applied_per_ally_might: i32,
+        #[serde(default)]
+        applied_per_ally_reflexes: i32,
+        #[serde(default)]
+        applied_per_ally_wisdom: i32,
+    },
+    /// Peels `amount` from might, reflexes, wisdom, max HP, and current HP ([`Property::DrainEnemyStatsOnHit`]).
+    StatDrain {
+        uid: u32,
+        amount: i32,
     },
     Hp {
         uid: u32,
@@ -164,13 +202,19 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
             let mut hat_sprite = None;
             let mut left_hand_sprite = None;
             let mut right_hand_sprite = None;
+            let mut hand_3_sprite = None;
+            let mut hand_4_sprite = None;
             let mut hat_id = None;
             let mut left_hand_id = None;
             let mut right_hand_id = None;
+            let mut hand_3_id = None;
+            let mut hand_4_id = None;
             for (slot_id, sprite_out, id_out) in [
                 (&m.hat, &mut hat_sprite, &mut hat_id),
                 (&m.left_hand, &mut left_hand_sprite, &mut left_hand_id),
                 (&m.right_hand, &mut right_hand_sprite, &mut right_hand_id),
+                (&m.hand_3, &mut hand_3_sprite, &mut hand_3_id),
+                (&m.hand_4, &mut hand_4_sprite, &mut hand_4_id),
             ] {
                 if let Some(iid) = slot_id {
                     *id_out = Some(iid.clone());
@@ -199,7 +243,11 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
                 .iter()
                 .filter(|p| matches!(p, Property::ReviveOnce))
                 .count() as u8;
-            props.retain(|p| !matches!(p, Property::ReviveOnce));
+            let revive_at_back_charges = props
+                .iter()
+                .filter(|p| matches!(p, Property::ReviveAtBackOnce))
+                .count() as u8;
+            props.retain(|p| !matches!(p, Property::ReviveOnce | Property::ReviveAtBackOnce));
             let (mana, max_mana) = healer_mana_from_props(&props);
             let uid = *uid_start;
             *uid_start += 1;
@@ -210,9 +258,13 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
                 hat_id,
                 left_hand_id,
                 right_hand_id,
+                hand_3_id,
+                hand_4_id,
                 hat_sprite,
                 left_hand_sprite,
                 right_hand_sprite,
+                hand_3_sprite,
+                hand_4_sprite,
                 max_hp: hp,
                 hp,
                 might,
@@ -227,6 +279,11 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
                 formation_hp_bonus: 0,
                 applied_enemy_reflex_debuff: 0,
                 revive_charges,
+                revive_at_back_charges,
+                applied_per_ally_might: 0,
+                applied_per_ally_reflexes: 0,
+                applied_per_ally_wisdom: 0,
+                per_ally_hp_bonus: 0,
                 mana,
                 max_mana,
             })
@@ -236,7 +293,7 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
 
 #[inline]
 fn effective_max_hp(c: &Combatant) -> i32 {
-    c.max_hp + c.formation_hp_bonus
+    c.max_hp + c.formation_hp_bonus + c.per_ally_hp_bonus
 }
 
 fn ally_front_formation_bonus(team: &[Combatant]) -> (i32, i32, i32, i32) {
@@ -303,7 +360,7 @@ fn refresh_formation_front_aura(team: &mut [Combatant], mut events: Option<&mut 
         c.applied_front_wisdom = want.2;
 
         c.formation_hp_bonus = new_fhb;
-        let eff_max = c.max_hp + c.formation_hp_bonus;
+        let eff_max = effective_max_hp(c);
         // Gaining aura HP bonus: add that pool like a heal (capped at new effective max).
         // Losing it: don't subtract dh from current hp — only clamp to the new ceiling so we
         // don't "damage" twice when another ally becomes formation front with the same aura.
@@ -328,8 +385,82 @@ fn refresh_formation_front_aura(team: &mut [Combatant], mut events: Option<&mut 
                     applied_front_reflexes: c.applied_front_reflexes,
                     applied_front_wisdom: c.applied_front_wisdom,
                     applied_enemy_reflex_debuff: c.applied_enemy_reflex_debuff,
+                    per_ally_hp_bonus: c.per_ally_hp_bonus,
+                    applied_per_ally_might: c.applied_per_ally_might,
+                    applied_per_ally_reflexes: c.applied_per_ally_reflexes,
+                    applied_per_ally_wisdom: c.applied_per_ally_wisdom,
                 });
             }
+        }
+    }
+}
+
+fn refresh_per_ally_aura(team: &mut [Combatant], mut events: Option<&mut Vec<CombatEvent>>) {
+    let alive = team.iter().filter(|c| c.hp > 0).count() as i32;
+    for c in team.iter_mut() {
+        if c.hp <= 0 {
+            // Strip applied bonus on death so accounting stays consistent.
+            let stripped = c.applied_per_ally_might != 0
+                || c.applied_per_ally_reflexes != 0
+                || c.applied_per_ally_wisdom != 0
+                || c.per_ally_hp_bonus != 0;
+            c.might -= c.applied_per_ally_might;
+            c.reflexes -= c.applied_per_ally_reflexes;
+            c.wisdom -= c.applied_per_ally_wisdom;
+            c.applied_per_ally_might = 0;
+            c.applied_per_ally_reflexes = 0;
+            c.applied_per_ally_wisdom = 0;
+            c.per_ally_hp_bonus = 0;
+            if stripped {
+                // Dead unit: no need to clamp hp (already 0) or emit a sync.
+            }
+            continue;
+        }
+        let per: i32 = c
+            .properties
+            .iter()
+            .filter_map(|p| {
+                if let Property::StatsPerLivingAlly { amount } = p {
+                    Some(*amount)
+                } else {
+                    None
+                }
+            })
+            .sum();
+        let others = (alive - 1).max(0);
+        let want = per * others;
+        if want == c.applied_per_ally_might
+            && want == c.applied_per_ally_reflexes
+            && want == c.applied_per_ally_wisdom
+            && want == c.per_ally_hp_bonus
+        {
+            continue;
+        }
+
+        let intrinsic_m = c.might - c.applied_per_ally_might;
+        let intrinsic_r = c.reflexes - c.applied_per_ally_reflexes;
+        let intrinsic_w = c.wisdom - c.applied_per_ally_wisdom;
+        c.might = intrinsic_m + want;
+        c.reflexes = intrinsic_r + want;
+        c.wisdom = intrinsic_w + want;
+        c.applied_per_ally_might = want;
+        c.applied_per_ally_reflexes = want;
+        c.applied_per_ally_wisdom = want;
+
+        let old_hp_bonus = c.per_ally_hp_bonus;
+        c.per_ally_hp_bonus = want;
+        let dh = want - old_hp_bonus;
+        let eff_max = effective_max_hp(c);
+        // Mirror BuffFormationFront's hp handling: gain heals, loss only clamps.
+        if dh > 0 {
+            c.hp = (c.hp + dh).min(eff_max);
+        } else {
+            c.hp = c.hp.min(eff_max);
+        }
+        c.hp = c.hp.max(0);
+
+        if let Some(ev) = events.as_mut() {
+            push_stat_sync(c, ev);
         }
     }
 }
@@ -473,7 +604,13 @@ fn living_gold(team: &[Combatant]) -> i32 {
         .filter(|c| c.hp > 0)
         .map(|c| {
             let mut cost = character_def(&c.def_id).map(|d| d.cost).unwrap_or(0);
-            for item_id in [&c.hat_id, &c.left_hand_id, &c.right_hand_id]
+            for item_id in [
+                &c.hat_id,
+                &c.left_hand_id,
+                &c.right_hand_id,
+                &c.hand_3_id,
+                &c.hand_4_id,
+            ]
                 .into_iter()
                 .flatten()
             {
@@ -551,9 +688,13 @@ fn summon_on_enemy_death(
                                 hat_id: None,
                                 left_hand_id: None,
                                 right_hand_id: None,
+                                hand_3_id: None,
+                                hand_4_id: None,
                                 hat_sprite: None,
                                 left_hand_sprite: None,
                                 right_hand_sprite: None,
+                                hand_3_sprite: None,
+                                hand_4_sprite: None,
                                 max_hp: def.hp,
                                 hp: def.hp,
                                 might: def.might,
@@ -568,6 +709,11 @@ fn summon_on_enemy_death(
                                 formation_hp_bonus: 0,
                                 applied_enemy_reflex_debuff: 0,
                                 revive_charges: 0,
+                                revive_at_back_charges: 0,
+                                applied_per_ally_might: 0,
+                                applied_per_ally_reflexes: 0,
+                                applied_per_ally_wisdom: 0,
+                                per_ally_hp_bonus: 0,
                                 mana,
                                 max_mana,
                             },
@@ -621,9 +767,13 @@ fn summon_on_ally_death(
                                 hat_id: None,
                                 left_hand_id: None,
                                 right_hand_id: None,
+                                hand_3_id: None,
+                                hand_4_id: None,
                                 hat_sprite: None,
                                 left_hand_sprite: None,
                                 right_hand_sprite: None,
+                                hand_3_sprite: None,
+                                hand_4_sprite: None,
                                 max_hp: def.hp,
                                 hp: def.hp,
                                 might: def.might,
@@ -638,6 +788,11 @@ fn summon_on_ally_death(
                                 formation_hp_bonus: 0,
                                 applied_enemy_reflex_debuff: 0,
                                 revive_charges: 0,
+                                revive_at_back_charges: 0,
+                                applied_per_ally_might: 0,
+                                applied_per_ally_reflexes: 0,
+                                applied_per_ally_wisdom: 0,
+                                per_ally_hp_bonus: 0,
                                 mana,
                                 max_mana,
                             },
@@ -675,6 +830,10 @@ fn push_stat_sync(c: &Combatant, events: &mut Vec<CombatEvent>) {
         applied_front_reflexes: c.applied_front_reflexes,
         applied_front_wisdom: c.applied_front_wisdom,
         applied_enemy_reflex_debuff: c.applied_enemy_reflex_debuff,
+        per_ally_hp_bonus: c.per_ally_hp_bonus,
+        applied_per_ally_might: c.applied_per_ally_might,
+        applied_per_ally_reflexes: c.applied_per_ally_reflexes,
+        applied_per_ally_wisdom: c.applied_per_ally_wisdom,
     });
 }
 
@@ -715,6 +874,10 @@ fn apply_flat_stat_damage_to_target(
     target.max_hp = (target.max_hp - amount).max(1);
     let cap = effective_max_hp(target);
     target.hp = (target.hp - amount).max(0).min(cap);
+    events.push(CombatEvent::StatDrain {
+        uid: target.uid,
+        amount,
+    });
     push_stat_sync(target, events);
 }
 
@@ -776,6 +939,8 @@ fn resolve_dropped_unit(
     }
 
     let will_revive = victims[victim_idx].revive_charges > 0;
+    let will_revive_at_back =
+        !will_revive && victims[victim_idx].revive_at_back_charges > 0;
     events.push(CombatEvent::Hp {
         uid: victim_uid,
         hp: 0,
@@ -801,6 +966,24 @@ fn resolve_dropped_unit(
             events.push(CombatEvent::Hp {
                 uid: victim_uid,
                 hp: victims[idx].hp,
+            });
+        }
+    } else if will_revive_at_back {
+        if let Some(idx) = victims.iter().position(|c| c.uid == victim_uid) {
+            victims[idx].revive_at_back_charges =
+                victims[idx].revive_at_back_charges.saturating_sub(1);
+            victims[idx].hp = effective_max_hp(&victims[idx]);
+            let hp = victims[idx].hp;
+            // Reposition to the back of the formation.
+            let unit = victims.remove(idx);
+            victims.push(unit);
+            events.push(CombatEvent::ReviveAtBack {
+                uid: victim_uid,
+                hp,
+            });
+            events.push(CombatEvent::Hp {
+                uid: victim_uid,
+                hp,
             });
         }
     }
@@ -975,6 +1158,8 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
     let mut right = build_team(right_build, 1, &mut uid_counter);
     refresh_formation_front_aura(&mut left, None);
     refresh_formation_front_aura(&mut right, None);
+    refresh_per_ally_aura(&mut left, None);
+    refresh_per_ally_aura(&mut right, None);
     refresh_enemy_reflex_debuffs(&mut left, &mut right, None);
     let mut events = vec![CombatEvent::Start {
         left: left.clone(),
@@ -1206,6 +1391,8 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build) -> BattleResult {
                 if needs_aura {
                     refresh_formation_front_aura(&mut left, Some(&mut events));
                     refresh_formation_front_aura(&mut right, Some(&mut events));
+                    refresh_per_ally_aura(&mut left, Some(&mut events));
+                    refresh_per_ally_aura(&mut right, Some(&mut events));
                     refresh_enemy_reflex_debuffs(&mut left, &mut right, Some(&mut events));
                 }
             }
@@ -1267,9 +1454,13 @@ mod tests {
             hat_id: None,
             left_hand_id: None,
             right_hand_id: None,
+            hand_3_id: None,
+            hand_4_id: None,
             hat_sprite: None,
             left_hand_sprite: None,
             right_hand_sprite: None,
+            hand_3_sprite: None,
+            hand_4_sprite: None,
             max_hp: 20,
             hp,
             might: 1,
@@ -1284,6 +1475,11 @@ mod tests {
             formation_hp_bonus: 0,
             applied_enemy_reflex_debuff: 0,
             revive_charges: 0,
+            revive_at_back_charges: 0,
+            applied_per_ally_might: 0,
+            applied_per_ally_reflexes: 0,
+            applied_per_ally_wisdom: 0,
+            per_ally_hp_bonus: 0,
             mana: 0,
             max_mana: 0,
         }
@@ -1430,6 +1626,9 @@ mod tests {
         assert_eq!(c.wisdom, 9);
         assert_eq!(c.max_hp, 19);
         assert_eq!(c.hp, 19);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::StatDrain { uid: 1, amount: 1 })));
         assert!(events
             .iter()
             .any(|e| matches!(e, CombatEvent::StatSync { uid: 1, .. })));

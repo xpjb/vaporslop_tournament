@@ -72,6 +72,8 @@ pub fn ai_ladder_build(target_cost: i32) -> Build {
             hat: None,
             left_hand: None,
             right_hand: None,
+            hand_3: None,
+            hand_4: None,
         });
     }
 
@@ -117,7 +119,7 @@ fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut impl Rn
 fn can_equip_item(member: &TeamMember, item: &ItemDef) -> bool {
     match item.slot {
         GearSlot::Hat => member.hat.is_none(),
-        GearSlot::Hand => member.left_hand.is_none() || member.right_hand.is_none(),
+        GearSlot::Hand => member_hand_slot_count(member) > member_filled_hands(member),
     }
 }
 
@@ -125,13 +127,29 @@ fn equip_item(member: &mut TeamMember, item: &ItemDef) {
     match item.slot {
         GearSlot::Hat => member.hat = Some(item.id.clone()),
         GearSlot::Hand => {
-            if member.left_hand.is_none() {
-                member.left_hand = Some(item.id.clone());
-            } else {
-                member.right_hand = Some(item.id.clone());
+            let limit = member_hand_slot_count(member);
+            for slot in ItemSlot::HAND_SLOTS.iter().take(limit as usize) {
+                let dest = member.hand_slot_mut(*slot);
+                if dest.is_none() {
+                    *dest = Some(item.id.clone());
+                    return;
+                }
             }
         }
     }
+}
+
+fn member_hand_slot_count(member: &TeamMember) -> u8 {
+    character_def(&member.def_id)
+        .map(|d| d.hand_slots)
+        .unwrap_or(2)
+}
+
+fn member_filled_hands(member: &TeamMember) -> u8 {
+    ItemSlot::HAND_SLOTS
+        .iter()
+        .filter(|slot| member.hand_slot(**slot).is_some())
+        .count() as u8
 }
 
 fn arrange_ai_team(team: &mut [TeamMember]) {
@@ -229,6 +247,8 @@ mod tests {
             hat: None,
             left_hand: None,
             right_hand: None,
+            hand_3: None,
+            hand_4: None,
         }];
         let mut rng = StdRng::seed_from_u64(1);
 

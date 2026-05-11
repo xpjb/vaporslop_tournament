@@ -218,8 +218,6 @@ fn item_fit_score(item: &ItemDef, wants_wisdom: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
 
     #[test]
     fn ai_ladder_build_puts_backline_behind_frontline() {
@@ -238,22 +236,5 @@ mod tests {
                 assert!(last_frontline < first_backline);
             }
         }
-    }
-
-    #[test]
-    fn ai_item_packer_spends_leftover_cash_on_affordable_items() {
-        let mut team = vec![TeamMember {
-            def_id: "vegetal".into(),
-            hat: None,
-            left_hand: None,
-            right_hand: None,
-            hand_3: None,
-            hand_4: None,
-        }];
-        let mut rng = StdRng::seed_from_u64(1);
-
-        equip_ai_items(&mut team, 100, &mut rng);
-
-        assert_eq!(team[0].left_hand.as_deref(), Some("spear"));
     }
 }

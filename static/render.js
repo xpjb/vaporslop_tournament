@@ -169,25 +169,26 @@ function drawSprite(ctx, s, t) {
       }
     }
   }
-  // left hand (drawn on the character's left = visually right when not flipped)
-  if (s.left_hand) {
-    const wi = img(s.left_hand);
-    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 50, y + 24, 40, 40);
-  }
-  // right hand (drawn on the character's right = visually left when not flipped)
-  if (s.right_hand) {
-    const wi = img(s.right_hand);
-    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 6, y + 24, 40, 40);
-  }
-  // 3rd hand (upper-left side, slightly above)
+  // Hands: stacks on character left / right (2nd-row items sit lower on the body).
+  const ly2 = y + 4, ly1 = y + 28;
+  const lw2 = 36, lw1 = 40;
   if (s.hand_3) {
     const wi = img(s.hand_3);
-    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 50, y - 4, 36, 36);
+    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 51, ly2, lw2, lw2);
   }
-  // 4th hand (upper-right side, slightly above)
+  if (s.left_hand) {
+    const wi = img(s.left_hand);
+    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 48, ly1, lw1, lw1);
+  }
+  const ry2 = y + 4, ry1 = y + 28;
+  const rw2 = 36, rw1 = 40;
   if (s.hand_4) {
     const wi = img(s.hand_4);
-    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 10, y - 4, 36, 36);
+    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 9, ry2, rw2, rw2);
+  }
+  if (s.right_hand) {
+    const wi = img(s.right_hand);
+    if (wi.complete && wi.naturalWidth) ctx.drawImage(wi, x + 8, ry1, rw1, rw1);
   }
   ctx.restore();
 

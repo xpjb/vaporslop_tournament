@@ -914,16 +914,21 @@ function renderIdentity(el, name, mmr, avatarId, opts = {}) {
 }
 const charDef = (id) => state.defs.characters.find(c => c.id === id);
 const itemDef = (id) => state.defs.items.find(i => i.id === id);
-const HAND_SLOT_KEYS = ["left_hand", "right_hand", "hand_3", "hand_4"];
-const HAND_SLOT_LABELS = { left_hand: "left", right_hand: "right", hand_3: "3rd", hand_4: "4th" };
-function memberHandSlots(member) {
+/** `TeamMember` JSON field, websocket `ItemSlot` name, empty-socket label */
+const HAND_ARM_ROWS = [
+  { itemProp: "left_hand", itemSlot: "left_hand", label: "left" },
+  { itemProp: "right_hand", itemSlot: "right_hand", label: "right" },
+  { itemProp: "hand_3", itemSlot: "left2", label: "left2" },
+  { itemProp: "hand_4", itemSlot: "right2", label: "right2" },
+];
+function activeHandArmRows(member) {
   const cd = member ? charDef(member.def_id) : null;
   const n = cd?.hand_slots ?? 2;
-  return HAND_SLOT_KEYS.slice(0, n);
+  return HAND_ARM_ROWS.slice(0, n);
 }
+const HAND_SLOT_SET = new Set(HAND_ARM_ROWS.map((r) => r.itemSlot));
 function memberSockets(member) {
-  const hands = memberHandSlots(member);
-  return [{ key: "hat", label: "hat" }, ...hands.map(k => ({ key: k, label: HAND_SLOT_LABELS[k] }))];
+  return [{ itemProp: "hat", itemSlot: "hat", label: "hat" }, ...activeHandArmRows(member)];
 }
 const STAT_KEYS = [
   { key: "might", label: "might" },
@@ -1074,7 +1079,10 @@ function statParts(p) {
 
 function memberItems(member) {
   return memberSockets(member)
-    .map(({ key }) => ({ key, item: member?.[key] ? itemDef(member[key]) : null }))
+    .map(({ itemProp }) => ({
+      key: itemProp,
+      item: member?.[itemProp] ? itemDef(member[itemProp]) : null,
+    }))
     .filter(({ item }) => item);
 }
 
@@ -1286,8 +1294,8 @@ function combatantTooltip(c) {
     ["hat", c.hat_id],
     ["left hand", c.left_hand_id],
     ["right hand", c.right_hand_id],
-    ["3rd hand", c.hand_3_id],
-    ["4th hand", c.hand_4_id],
+    ["left2", c.hand_3_id],
+    ["right2", c.hand_4_id],
   ].filter(([, id]) => id);
   const itemRows = itemIds.length
     ? itemIds.map(([slot, id]) => {
@@ -1629,7 +1637,6 @@ function itemSocketId(slot) {
   if (slot === "hat") return "hat";
   return "hand";
 }
-const HAND_SLOT_SET = new Set(HAND_SLOT_KEYS);
 function isHandSlot(slot) { return slot === "hand" || HAND_SLOT_SET.has(slot); }
 function slotAccepts(targetSlot, itemSlot) {
   if (itemSlot === "hat") return targetSlot === "hat";
@@ -1640,8 +1647,8 @@ function firstFreeSlot(member, itemSlot) {
   if (!member) return null;
   if (itemSlot === "hat") return member.hat ? null : "hat";
   if (isHandSlot(itemSlot)) {
-    for (const k of memberHandSlots(member)) {
-      if (!member[k]) return k;
+    for (const row of activeHandArmRows(member)) {
+      if (!member[row.itemProp]) return row.itemSlot;
     }
     return null;
   }
@@ -1657,15 +1664,17 @@ function canSwapTeamItem(data, target, targetSlot) {
   return !!targetItem && slotAccepts(data.slot, itemSocketId(targetItem.slot));
 }
 function renderItemSockets(teamIdx, member) {
-  const sockets = document.createElement("div");
-  sockets.className = "item-sockets";
-  memberSockets(member).forEach(({ key, label }) => {
-    const itemId = member[key];
+  const root = document.createElement("div");
+  root.className = "item-sockets";
+
+  function appendSocket(container, { itemProp, itemSlot, label }) {
+    const itemId = member[itemProp];
     const socket = document.createElement("div");
     socket.className = "item-socket" + (itemId ? " filled" : "");
     socket.dataset.teamIdx = teamIdx;
-    socket.dataset.itemSlot = key;
+    socket.dataset.itemSlot = itemSlot;
     socket.setAttribute("aria-label", label);
+    const gearSlotFallback = itemProp === "hat" ? "hat" : "hand";
     if (itemId) {
       const item = itemDef(itemId);
       socket.draggable = true;
@@ -1674,7 +1683,12 @@ function renderItemSockets(teamIdx, member) {
       socket.addEventListener("dragstart", (e) => {
         e.stopPropagation();
         hideTooltipNow();
-        setDrag(e, { type: "team_item", team: teamIdx, slot: key, itemSlot: item?.slot ?? key });
+        setDrag(e, {
+          type: "team_item",
+          team: teamIdx,
+          slot: itemSlot,
+          itemSlot: item?.slot ?? gearSlotFallback,
+        });
         socket.classList.add("dragging");
       });
       socket.addEventListener("dragend", onDragEnd);
@@ -1684,9 +1698,27 @@ function renderItemSockets(teamIdx, member) {
     socket.addEventListener("dragover", onItemSocketDragOver);
     socket.addEventListener("dragleave", onItemSocketDragLeave);
     socket.addEventListener("drop", onItemSocketDrop);
-    sockets.appendChild(socket);
-  });
-  return sockets;
+    container.appendChild(socket);
+  }
+
+  const leftCol = document.createElement("div");
+  leftCol.className = "item-socket-stack item-socket-stack--left";
+  const hatCol = document.createElement("div");
+  hatCol.className = "item-socket-stack item-socket-stack--hat";
+  const rightCol = document.createElement("div");
+  rightCol.className = "item-socket-stack item-socket-stack--right";
+
+  const hands = activeHandArmRows(member);
+  hands
+    .filter((r) => r.itemProp === "left_hand" || r.itemProp === "hand_3")
+    .forEach((r) => appendSocket(leftCol, r));
+  appendSocket(hatCol, { itemProp: "hat", itemSlot: "hat", label: "hat" });
+  hands
+    .filter((r) => r.itemProp === "right_hand" || r.itemProp === "hand_4")
+    .forEach((r) => appendSocket(rightCol, r));
+
+  root.append(leftCol, hatCol, rightCol);
+  return root;
 }
 function onCharacterDragStart(e) {
   const from = parseInt(e.currentTarget.dataset.idx, 10);

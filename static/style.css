@@ -692,6 +692,14 @@ input {
   gap: .25rem;
   width: 100%;
   margin-top: .35rem;
+  align-items: stretch;
+}
+.item-socket-stack {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  justify-content: center;
+  min-width: 0;
 }
 .item-socket {
   min-height: 38px;

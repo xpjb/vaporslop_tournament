@@ -118,7 +118,9 @@ pub enum ItemSlot {
     Hat,
     LeftHand,
     RightHand,
+    #[serde(rename = "left2", alias = "hand_3", alias = "hand3")]
     Hand3,
+    #[serde(rename = "right2", alias = "hand_4", alias = "hand4")]
     Hand4,
 }
 

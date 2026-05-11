@@ -672,6 +672,8 @@ input {
   object-fit: contain; object-position: center bottom;
   image-rendering: pixelated;
   filter: drop-shadow(0 0 6px rgba(74,242,255,0.4));
+  -webkit-user-drag: none;
+  user-drag: none;
 }
 .card .name { font-size: 1rem; color: var(--neon-cyan); margin-top: .2rem; min-height: 1.4em; }
 .card .cost { color: var(--neon-yellow); }
@@ -814,6 +816,8 @@ input {
   image-rendering: pixelated;
   filter: drop-shadow(0 0 4px var(--neon-yellow));
   pointer-events: none;
+  -webkit-user-drag: none;
+  user-drag: none;
 }
 .item-socket.filled { cursor: grab; border-color: var(--neon-yellow); }
 .item-socket.drag-over { outline: 2px solid var(--neon-yellow); outline-offset: -2px; }

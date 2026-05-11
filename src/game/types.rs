@@ -102,6 +102,8 @@ pub enum Property {
     DrainEnemyStatsOnHit {
         amount: i32,
     },
+    /// Wearer has four hand slots instead of two.
+    FourHanded,
 }
 
 /// Where an item may be equipped. Hand items go into any free hand slot.
@@ -133,10 +135,6 @@ impl ItemSlot {
     ];
 }
 
-fn default_hand_slots() -> u8 {
-    2
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterDef {
     pub id: String,
@@ -148,8 +146,16 @@ pub struct CharacterDef {
     pub wisdom: i32,
     pub hp: i32,
     pub properties: Vec<Property>,
-    #[serde(default = "default_hand_slots")]
-    pub hand_slots: u8,
+}
+
+impl CharacterDef {
+    pub fn hand_slots(&self) -> u8 {
+        if self.properties.iter().any(|p| matches!(p, Property::FourHanded)) {
+            4
+        } else {
+            2
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

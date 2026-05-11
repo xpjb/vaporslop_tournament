@@ -83,75 +83,83 @@ impl Db {
         "#,
         )?;
 
-        // Pre-v4 schema: legacy `runs` table doubled as live state + matchmaking pool.
-        // Keep the CREATE here so the v4 migration below has a source table to read
-        // from on a fresh DB (no rows to copy, just empty schema). After the v4 step
-        // runs, the table is dropped.
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS runs (
-                id TEXT PRIMARY KEY,
-                player_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                money INTEGER NOT NULL,
-                wins INTEGER NOT NULL,
-                losses INTEGER NOT NULL,
-                streak INTEGER NOT NULL,
-                best_streak INTEGER NOT NULL,
-                alive INTEGER NOT NULL,
-                phase TEXT NOT NULL,
-                build_json TEXT NOT NULL,
-                shop_json TEXT NOT NULL,
-                cost_value INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_runs_cost ON runs(cost_value);
-            CREATE TABLE IF NOT EXISTS leaderboard (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                streak INTEGER NOT NULL,
-                wins INTEGER NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-        "#,
-        )?;
-        ensure_column(&conn, "runs", "player_id", "TEXT")?;
-        ensure_column(&conn, "runs", "best_streak", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "runs", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
-        ensure_column(&conn, "leaderboard", "player_id", "TEXT")?;
-        ensure_column(&conn, "leaderboard", "updated_at", "INTEGER")?;
-        ensure_column(&conn, "leaderboard", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
-        conn.execute(
-            "UPDATE runs SET player_id = id WHERE player_id IS NULL OR player_id = ''",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE runs SET best_streak = streak WHERE best_streak < streak",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE leaderboard SET player_id = id WHERE player_id IS NULL OR player_id = ''",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE leaderboard SET updated_at = created_at WHERE updated_at IS NULL",
-            [],
-        )?;
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_player ON leaderboard(player_id)",
-            [],
-        )?;
-        // Older versions persisted Phase::Battle. We never want to resume into that;
-        // collapse to Shop. (Same coercion lands later for player_state during the
-        // v4 migration since it copies from `runs`.)
-        conn.execute(
-            "UPDATE runs SET phase = ?1 WHERE phase = ?2",
-            params![
-                serde_json::to_string(&Phase::Shop)?,
-                serde_json::to_string(&Phase::Battle)?,
-            ],
-        )?;
         let db_ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // Pre-v4 schema: legacy `runs` table doubled as live state + matchmaking pool.
+        // Pre-v7 schema: `leaderboard` mirrored profile rows. Both are dropped by later
+        // migrations; we only need them to exist (with the right columns) for those
+        // migrations to read from. Gating these on db_ver < {4,7} keeps post-migration
+        // opens from re-creating empty husks of dropped tables.
+        if db_ver < 4 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    player_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    money INTEGER NOT NULL,
+                    wins INTEGER NOT NULL,
+                    losses INTEGER NOT NULL,
+                    streak INTEGER NOT NULL,
+                    best_streak INTEGER NOT NULL,
+                    alive INTEGER NOT NULL,
+                    phase TEXT NOT NULL,
+                    build_json TEXT NOT NULL,
+                    shop_json TEXT NOT NULL,
+                    cost_value INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_runs_cost ON runs(cost_value);
+            "#,
+            )?;
+            ensure_column(&conn, "runs", "player_id", "TEXT")?;
+            ensure_column(&conn, "runs", "best_streak", "INTEGER NOT NULL DEFAULT 0")?;
+            ensure_column(&conn, "runs", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
+            conn.execute(
+                "UPDATE runs SET player_id = id WHERE player_id IS NULL OR player_id = ''",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE runs SET best_streak = streak WHERE best_streak < streak",
+                [],
+            )?;
+            // Older versions persisted Phase::Battle. We never want to resume into that;
+            // collapse to Shop. (Same coercion lands later for player_state during the
+            // v4 migration since it copies from `runs`.)
+            conn.execute(
+                "UPDATE runs SET phase = ?1 WHERE phase = ?2",
+                params![
+                    serde_json::to_string(&Phase::Shop)?,
+                    serde_json::to_string(&Phase::Battle)?,
+                ],
+            )?;
+        }
+        if db_ver < 7 {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS leaderboard (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    streak INTEGER NOT NULL,
+                    wins INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                )",
+                [],
+            )?;
+            ensure_column(&conn, "leaderboard", "player_id", "TEXT")?;
+            ensure_column(&conn, "leaderboard", "updated_at", "INTEGER")?;
+            ensure_column(&conn, "leaderboard", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
+            conn.execute(
+                "UPDATE leaderboard SET player_id = id WHERE player_id IS NULL OR player_id = ''",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE leaderboard SET updated_at = created_at WHERE updated_at IS NULL",
+                [],
+            )?;
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_player ON leaderboard(player_id)",
+                [],
+            )?;
+        }
         if db_ver < 2 {
             // One-time: remove ladder rows from older versions (bots are generated on demand now).
             conn.execute(
@@ -286,6 +294,9 @@ impl Db {
             )?;
             conn.pragma_update(None, "user_version", 5)?;
         }
+        ensure_column(&conn, "player_profiles", "mmr", "INTEGER NOT NULL DEFAULT 1000")?;
+        ensure_column(&conn, "player_profiles", "best_streak", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "player_profiles", "last_battle_at", "INTEGER NOT NULL DEFAULT 0")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
@@ -351,6 +362,54 @@ impl Db {
             tx.pragma_update(None, "user_version", 6)?;
             tx.commit()?;
         }
+        if db_ver < 7 {
+            // v7: collapse the `leaderboard` table into `player_profiles`. Previously each
+            // battle commit wrote to both tables; `name` and the per-player best `wins` were
+            // mirrored, which let them drift (notably: v5 capped `player_profiles.best_wins`
+            // to MAX_WINS but left `leaderboard.wins` at the historical higher value, so the
+            // profile page showed 30 while the leaderboard showed 36 for the same player).
+            //
+            // After this migration, `player_profiles` carries the ranking columns (mmr,
+            // best_streak, last_battle_at) and is itself the leaderboard — the LB query is
+            // just an ORDER BY over this table, filtered to players who have battled.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO player_profiles
+                   (player_id, name, selected_avatar, best_wins, ultimate_victories)
+                 SELECT player_id, COALESCE(name, 'anon'), 'meme_man', 0, 0
+                 FROM leaderboard
+                 WHERE player_id IS NOT NULL AND player_id != ''",
+                [],
+            )?;
+            // Cap leaderboard.wins at MAX_WINS so the historical overshoot doesn't survive.
+            tx.execute(
+                "UPDATE player_profiles AS p
+                 SET mmr = (SELECT l.mmr FROM leaderboard l WHERE l.player_id = p.player_id),
+                     best_streak = MAX(
+                       p.best_streak,
+                       (SELECT l.streak FROM leaderboard l WHERE l.player_id = p.player_id)
+                     ),
+                     best_wins = MAX(
+                       p.best_wins,
+                       MIN((SELECT l.wins FROM leaderboard l WHERE l.player_id = p.player_id), ?1)
+                     ),
+                     last_battle_at = COALESCE(
+                       (SELECT l.updated_at FROM leaderboard l WHERE l.player_id = p.player_id),
+                       0
+                     )
+                 WHERE EXISTS (SELECT 1 FROM leaderboard l WHERE l.player_id = p.player_id)",
+                params![MAX_WINS],
+            )?;
+            tx.execute("DROP TABLE leaderboard", [])?;
+            tx.pragma_update(None, "user_version", 7)?;
+            tx.commit()?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_profiles_rank
+             ON player_profiles(mmr DESC, best_wins DESC, best_streak DESC, last_battle_at ASC)
+             WHERE last_battle_at > 0",
+            [],
+        )?;
         recompute_opponent_costs(&conn)?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
@@ -410,10 +469,6 @@ impl Db {
         )?;
         conn.execute(
             "UPDATE player_state SET name = ?2 WHERE player_id = ?1",
-            params![player_id, name],
-        )?;
-        conn.execute(
-            "UPDATE leaderboard SET name = ?2 WHERE player_id = ?1",
             params![player_id, name],
         )?;
         load_player_profile_on(&conn, player_id)
@@ -641,16 +696,10 @@ impl Db {
             &run.player_id,
             &run.name,
             run.wins,
-            completed_ultimate_victory,
-        )?;
-        record_score_on(
-            &tx,
-            &run.player_id,
-            &run.name,
             run.best_streak,
-            run.wins,
             run.mmr,
             update_mmr,
+            completed_ultimate_victory,
         )?;
         upsert_player_state_on(&tx, run)?;
         let player_opponent_id = insert_opponent_on(&tx, run)?;
@@ -707,7 +756,9 @@ impl Db {
 
     pub fn player_mmr(&self, player_id: &str) -> Result<Option<i32>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT mmr FROM leaderboard WHERE player_id = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT mmr FROM player_profiles WHERE player_id = ?1 AND last_battle_at > 0",
+        )?;
         let mut rows = stmt.query([player_id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
@@ -770,7 +821,7 @@ impl Db {
         mmr: i32,
     ) -> Result<()> {
         let conn = self.conn.lock();
-        record_score_on(&conn, player_id, name, streak, wins, mmr, true)?;
+        record_profile_progress_on(&conn, player_id, name, wins, streak, mmr, true, false)?;
         Ok(())
     }
 
@@ -780,13 +831,20 @@ impl Db {
         insert_opponent_on(&conn, run)
     }
 
+    /// Paginated leaderboard view. Only includes players who have battled
+    /// (`last_battle_at > 0`); a fresh profile row with default MMR doesn't appear
+    /// until its first `record_battle_and_save_state` call.
     pub fn leaderboard(
         &self,
         page: usize,
         per_page: usize,
-    ) -> Result<(Vec<(String, String, i32, i32, i32, String)>, usize)> {
+    ) -> Result<(Vec<(String, String, i32, i32, String)>, usize)> {
         let conn = self.conn.lock();
-        let total: i64 = conn.query_row("SELECT COUNT(*) FROM leaderboard", [], |r| r.get(0))?;
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM player_profiles WHERE last_battle_at > 0",
+            [],
+            |r| r.get(0),
+        )?;
         let page_count = if total == 0 {
             1
         } else {
@@ -795,30 +853,27 @@ impl Db {
         let page = page.clamp(1, page_count);
         let offset = (page - 1) * per_page;
         let mut stmt = conn.prepare(
-            "SELECT l.player_id,l.name,l.streak,l.wins,l.mmr,COALESCE(p.selected_avatar,'meme_man')
-             FROM leaderboard l
-             LEFT JOIN player_profiles p ON p.player_id = l.player_id
-             ORDER BY l.mmr DESC, l.wins DESC, l.streak DESC, l.updated_at ASC
+            "SELECT player_id, name, best_wins, mmr, selected_avatar
+             FROM player_profiles
+             WHERE last_battle_at > 0
+             ORDER BY mmr DESC, best_wins DESC, best_streak DESC, last_battle_at ASC
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![per_page as i64, offset as i64], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?;
         Ok((rows.filter_map(|r| r.ok()).collect(), page_count))
     }
 
     /// 1-based rank and MMR of a player on the leaderboard, if they have an entry.
+    /// A profile with `last_battle_at = 0` (never battled) is treated as not ranked.
     pub fn player_rank(&self, player_id: &str) -> Result<Option<(usize, i32)>> {
         let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare("SELECT mmr,wins,streak,updated_at FROM leaderboard WHERE player_id = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT mmr, best_wins, best_streak, last_battle_at
+             FROM player_profiles
+             WHERE player_id = ?1 AND last_battle_at > 0",
+        )?;
         let mut rows = stmt.query([player_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
@@ -826,13 +881,15 @@ impl Db {
         let mmr: i32 = row.get(0)?;
         let wins: i32 = row.get(1)?;
         let streak: i32 = row.get(2)?;
-        let updated_at: i64 = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+        let updated_at: i64 = row.get(3)?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM leaderboard WHERE
-               mmr > ?1
-               OR (mmr = ?1 AND wins > ?2)
-               OR (mmr = ?1 AND wins = ?2 AND streak > ?3)
-               OR (mmr = ?1 AND wins = ?2 AND streak = ?3 AND updated_at < ?4)",
+            "SELECT COUNT(*) FROM player_profiles
+             WHERE last_battle_at > 0 AND (
+                 mmr > ?1
+                 OR (mmr = ?1 AND best_wins > ?2)
+                 OR (mmr = ?1 AND best_wins = ?2 AND best_streak > ?3)
+                 OR (mmr = ?1 AND best_wins = ?2 AND best_streak = ?3 AND last_battle_at < ?4)
+             )",
             params![mmr, wins, streak, updated_at],
             |r| r.get(0),
         )?;
@@ -897,11 +954,19 @@ fn ensure_player_profile_on(
     load_player_profile_on(conn, player_id)
 }
 
+/// Post-battle update of the player's profile/ranking row. Folds in best-wins / best-streak
+/// growth, optionally swaps in the new MMR (skipped for synthetic AI battles), bumps
+/// `last_battle_at` so the player is included in the leaderboard, and increments the
+/// ultimate-victory counter on a tournament win. This is the sole writer to the ranking
+/// columns — the leaderboard query is just an ORDER BY over what we set here.
 fn record_profile_progress_on(
     conn: &Connection,
     player_id: &str,
     name: &str,
     wins: i32,
+    best_streak: i32,
+    mmr: i32,
+    update_mmr: bool,
     completed_ultimate_victory: bool,
 ) -> Result<()> {
     ensure_player_profile_on(conn, player_id, name)?;
@@ -909,12 +974,18 @@ fn record_profile_progress_on(
         "UPDATE player_profiles
          SET name = ?2,
              best_wins = MAX(best_wins, ?3),
-             ultimate_victories = ultimate_victories + ?4
+             best_streak = MAX(best_streak, ?4),
+             mmr = CASE WHEN ?6 THEN ?5 ELSE mmr END,
+             last_battle_at = strftime('%s','now'),
+             ultimate_victories = ultimate_victories + ?7
          WHERE player_id = ?1",
         params![
             player_id,
             clean_profile_name(name),
             wins,
+            best_streak,
+            mmr,
+            update_mmr,
             if completed_ultimate_victory { 1 } else { 0 },
         ],
     )?;
@@ -1072,36 +1143,6 @@ fn insert_battle_on(
         ],
     )?;
     Ok(conn.last_insert_rowid())
-}
-
-fn record_score_on(
-    conn: &Connection,
-    player_id: &str,
-    name: &str,
-    streak: i32,
-    wins: i32,
-    mmr: i32,
-    update_mmr: bool,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO leaderboard(player_id,name,streak,wins,mmr,created_at,updated_at)
-         VALUES(?,?,?,?,?,strftime('%s','now'),strftime('%s','now'))
-         ON CONFLICT(player_id) DO UPDATE SET
-           name=excluded.name,
-           streak=CASE
-             WHEN excluded.wins > leaderboard.wins THEN excluded.streak
-             WHEN excluded.wins = leaderboard.wins AND excluded.streak > leaderboard.streak THEN excluded.streak
-             ELSE leaderboard.streak
-           END,
-           wins=MAX(leaderboard.wins, excluded.wins),
-           mmr=CASE
-             WHEN ?6 THEN excluded.mmr
-             ELSE leaderboard.mmr
-           END,
-           updated_at=strftime('%s','now')",
-        params![player_id, name, streak, wins, mmr, update_mmr],
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1318,8 +1359,8 @@ mod tests {
             .unwrap()
             .expect("real opponent battle should create replay row");
 
-        let conn = db.conn.lock();
-        let (seed, outcome, mmr_before, version, p_op, e_op): (u32, String, i32, u32, i64, i64) =
+        let (seed, outcome, mmr_before, version, p_op, e_op): (u32, String, i32, u32, i64, i64) = {
+            let conn = db.conn.lock();
             conn.query_row(
                 "SELECT combat_seed, outcome, player_mmr_before, version_hash,
                         player_opponent_id, enemy_opponent_id
@@ -1336,7 +1377,8 @@ mod tests {
                     ))
                 },
             )
-            .unwrap();
+            .unwrap()
+        };
         assert_eq!(seed, combat_seed);
         assert_eq!(outcome, "win");
         assert_eq!(mmr_before, player_mmr_before);
@@ -1360,11 +1402,8 @@ mod tests {
     #[test]
     fn leaderboard_keeps_each_players_best_score() {
         let db = test_db();
-        db.conn
-            .lock()
-            .execute("DELETE FROM leaderboard", [])
-            .unwrap();
 
+        // Same player records two runs; best_wins takes the max, name updates to latest.
         db.record_score("player-1", "old name", 2, 4, 1000).unwrap();
         db.record_score("player-1", "new name", 1, 3, 1000).unwrap();
         db.record_score("player-2", "winner", 3, 5, 1100).unwrap();
@@ -1376,7 +1415,6 @@ mod tests {
             vec![(
                 "player-2".to_string(),
                 "winner".to_string(),
-                3,
                 5,
                 1100,
                 "meme_man".to_string()
@@ -1389,7 +1427,6 @@ mod tests {
             vec![(
                 "player-1".to_string(),
                 "new name".to_string(),
-                2,
                 4,
                 1000,
                 "meme_man".to_string()
@@ -1400,10 +1437,6 @@ mod tests {
     #[test]
     fn leaderboard_orders_by_mmr_before_score() {
         let db = test_db();
-        db.conn
-            .lock()
-            .execute("DELETE FROM leaderboard", [])
-            .unwrap();
 
         db.record_score("player-1", "low mmr", 5, 10, 900).unwrap();
         db.record_score("player-2", "high mmr", 1, 1, 1200).unwrap();
@@ -1416,14 +1449,12 @@ mod tests {
                     "player-2".to_string(),
                     "high mmr".to_string(),
                     1,
-                    1,
                     1200,
                     "meme_man".to_string()
                 ),
                 (
                     "player-1".to_string(),
                     "low mmr".to_string(),
-                    5,
                     10,
                     900,
                     "meme_man".to_string()
@@ -1622,7 +1653,6 @@ mod tests {
                 "player-1".to_string(),
                 "winner".to_string(),
                 1,
-                1,
                 1016,
                 "meme_man".to_string()
             )]
@@ -1661,7 +1691,6 @@ mod tests {
             vec![(
                 "player-1".to_string(),
                 "winner".to_string(),
-                2,
                 2,
                 1100,
                 "meme_man".to_string()

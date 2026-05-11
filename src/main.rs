@@ -902,7 +902,7 @@ async fn handle_run_action(
                 }
                 GearSlot::Hand => {
                     let hand_count = character_def(&member.def_id)
-                        .map(|d| d.hand_slots)
+                        .map(|d| d.hand_slots())
                         .unwrap_or(2) as usize;
                     let target_slot = ItemSlot::HAND_SLOTS
                         .iter()
@@ -1198,7 +1198,7 @@ fn leaderboard_msg(
     Ok(ServerMsg::Leaderboard {
         entries: entries
             .into_iter()
-            .map(|(player_id, name, _streak, wins, mmr, avatar)| LbEntry {
+            .map(|(player_id, name, wins, mmr, avatar)| LbEntry {
                 player_id,
                 name,
                 avatar,
@@ -1281,7 +1281,7 @@ fn slot_accepts(target: ItemSlot, item: GearSlot) -> bool {
 
 fn member_has_slot(member: &TeamMember, slot: ItemSlot) -> bool {
     let hand_count = character_def(&member.def_id)
-        .map(|d| d.hand_slots)
+        .map(|d| d.hand_slots())
         .unwrap_or(2);
     match slot {
         ItemSlot::Hat | ItemSlot::LeftHand | ItemSlot::RightHand => true,

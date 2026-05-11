@@ -136,7 +136,7 @@ fn equip_item(member: &mut TeamMember, item: &ItemDef) {
 
 fn member_hand_slot_count(member: &TeamMember) -> u8 {
     character_def(&member.def_id)
-        .map(|d| d.hand_slots)
+        .map(|d| d.hand_slots())
         .unwrap_or(2)
 }
 

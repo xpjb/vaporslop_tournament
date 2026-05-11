@@ -1126,7 +1126,7 @@ const HAND_ARM_ROWS = [
 ];
 function activeHandArmRows(member) {
   const cd = member ? charDef(member.def_id) : null;
-  const n = cd?.hand_slots ?? 2;
+  const n = (cd?.properties || []).some((p) => p?.kind === "four_handed") ? 4 : 2;
   return HAND_ARM_ROWS.slice(0, n);
 }
 const HAND_SLOT_SET = new Set(HAND_ARM_ROWS.map((r) => r.itemSlot));
@@ -1361,6 +1361,7 @@ function propertyText(p) {
       const n = Number(p.amount) || 0;
       return `+${escape(String(n))} damage to all stats`;
     }
+    case "four_handed": return "4 handed";
     default: return escape(p.kind || "property");
   }
 }
@@ -1831,7 +1832,7 @@ function renderTeam() {
     if (m) {
       const cd = charDef(m.def_id);
       slot.innerHTML = `
-        <img class="portrait" src="${assetHref(cd.sprite)}" />
+        <img class="portrait" src="${assetHref(cd.sprite)}" alt="" draggable="false" />
         <div class="name">${cd.name}</div>
         ${characterStatsHtml(cd)}
         <div class="cost">$${cd.cost}</div>
@@ -1923,7 +1924,7 @@ function renderItemSockets(teamIdx, member) {
     if (itemId) {
       const item = itemDef(itemId);
       socket.draggable = true;
-      socket.innerHTML = item ? `<img src="${assetHref(item.sprite)}" alt="${escape(item.name)}" />` : label;
+      socket.innerHTML = item ? `<img src="${assetHref(item.sprite)}" alt="${escape(item.name)}" draggable="false" />` : label;
       if (item) attachTooltip(socket, () => itemTooltip(item));
       socket.addEventListener("dragstart", (e) => {
         e.stopPropagation();
@@ -2134,7 +2135,7 @@ function renderShop() {
     const cantAfford = cd.cost > bal;
     c.className = "card" + (cantAfford ? " cant-afford" : "");
     c.innerHTML = `
-      <img src="${assetHref(cd.sprite)}" />
+      <img src="${assetHref(cd.sprite)}" alt="" draggable="false" />
       <div class="name">${cd.name}</div>
       ${characterStatsHtml(cd)}
       <div class="cost">$${cd.cost}</div>
@@ -2172,7 +2173,7 @@ function renderShop() {
       (cantAfford ? " cant-afford" : "");
     c.draggable = !cantAfford;
     c.innerHTML = `
-      <img src="${assetHref(it.sprite)}" />
+      <img src="${assetHref(it.sprite)}" alt="" draggable="false" />
       <div class="name">${it.name}</div>
       <div class="cost">$${it.cost}</div>
       <div class="stats">${it.slot}</div>

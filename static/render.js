@@ -655,7 +655,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     const point = canvasPoint(canvas, ev);
     const hit = hitSprite([...leftList, ...rightList], point);
     if (!hit) {
-      if (hovered) tooltip.hideTooltip?.();
+      if (hovered) tooltip.hideTooltipNow?.();
       hovered = null;
       return;
     }
@@ -665,7 +665,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   };
   const onMouseLeave = () => {
     hovered = null;
-    tooltip.hideTooltip?.();
+    tooltip.hideTooltipNow?.();
   };
   canvas.addEventListener("mousemove", onMouseMove);
   canvas.addEventListener("mouseleave", onMouseLeave);
@@ -678,7 +678,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     audio.dispose();
     canvas.removeEventListener("mousemove", onMouseMove);
     canvas.removeEventListener("mouseleave", onMouseLeave);
-    tooltip.hideTooltip?.();
+    tooltip.hideTooltipNow?.();
   };
 
   function applyEvent(ev) {
@@ -1157,6 +1157,10 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
     drawParticles(ctx, "front");
     drawFloaters(ctx);
     ctx.restore();
+    if (hovered?.dead) {
+      tooltip.hideTooltipNow?.();
+      hovered = null;
+    }
     if (hovered && !hovered.dead) {
       hovered.tooltipReference ||= spriteReference(canvas, hovered);
       tooltip.showTooltip?.(hovered.tooltipReference, hovered);
@@ -1178,7 +1182,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         floaters = [];
         screenShake = 0;
         hovered = null;
-        tooltip.hideTooltip?.();
+        tooltip.hideTooltipNow?.();
         audio.dispose();
         audio = createBattleAudio();
       } else {

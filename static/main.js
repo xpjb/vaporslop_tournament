@@ -887,7 +887,7 @@ function handleServer(msg) {
         }
       }, {
         showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-        hideTooltip,
+        hideTooltipNow,
       });
       break;
     case "leaderboard":
@@ -1569,7 +1569,7 @@ function populateGameOver(r, battleMsg) {
       state.gameOverReplayKey = key;
       playBattle($("#goReplayCanvas"), battleMsg, charDef, itemDef, () => {}, {
         showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-        hideTooltip,
+        hideTooltipNow,
         loop: true,
       });
     }
@@ -1756,6 +1756,7 @@ function renderItemSockets(teamIdx, member) {
   return root;
 }
 function onCharacterDragStart(e) {
+  hideTooltipNow();
   const from = parseInt(e.currentTarget.dataset.idx, 10);
   setDrag(e, { type: "character", team: from });
   e.currentTarget.classList.add("dragging");
@@ -1832,6 +1833,7 @@ function onTeamSlotDrop(e) {
   }
 }
 function onDragEnd(e) {
+  hideTooltipNow();
   e.currentTarget.classList.remove("dragging");
   document.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
   dragState = null;
@@ -2138,7 +2140,7 @@ $("#replayBattleBtn").onclick = () => {
     }
   }, {
     showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-    hideTooltip,
+    hideTooltipNow,
   });
 };
 $("#goReplayBtn").onclick = () => {
@@ -2149,7 +2151,7 @@ $("#goReplayBtn").onclick = () => {
   state.gameOverReplayKey = `${r.id}:${state.lastBattle.events.length}`;
   playBattle($("#goReplayCanvas"), state.lastBattle, charDef, itemDef, () => {}, {
     showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-    hideTooltip,
+    hideTooltipNow,
     loop: true,
   });
 };

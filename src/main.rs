@@ -231,6 +231,7 @@ enum ServerMsg {
         page_count: usize,
         per_page: usize,
         player_rank: Option<usize>,
+        player_mmr: Option<i32>,
     },
     Error {
         message: String,
@@ -1120,13 +1121,16 @@ fn leaderboard_msg(
     let per_page = per_page
         .unwrap_or(DEFAULT_LEADERBOARD_PAGE_SIZE)
         .clamp(1, MAX_LEADERBOARD_PAGE_SIZE);
-    let player_rank = match around_player_id {
+    let player_info = match around_player_id {
         Some(id) if !id.is_empty() => state.db.player_rank(id).map_err(|e| e.to_string())?,
         _ => None,
     };
-    let page = match player_rank {
-        Some(rank) => ((rank - 1) / per_page) + 1,
-        None => page.unwrap_or(1).max(1),
+    let player_rank = player_info.map(|(rank, _)| rank);
+    let player_mmr = player_info.map(|(_, mmr)| mmr);
+    let page = match (page, player_rank) {
+        (Some(p), _) => p.max(1),
+        (None, Some(rank)) => ((rank - 1) / per_page) + 1,
+        (None, None) => 1,
     };
     let (entries, page_count) = state
         .db
@@ -1147,6 +1151,7 @@ fn leaderboard_msg(
         page_count,
         per_page,
         player_rank,
+        player_mmr,
     })
 }
 

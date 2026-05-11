@@ -245,6 +245,14 @@ impl Db {
              WHERE username IS NOT NULL",
             [],
         )?;
+        if db_ver < 5 {
+            // Cap historical best_wins values from when the run cap was higher than MAX_WINS.
+            conn.execute(
+                "UPDATE player_profiles SET best_wins = ?1 WHERE best_wins > ?1",
+                params![MAX_WINS],
+            )?;
+            conn.pragma_update(None, "user_version", 5)?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
@@ -648,8 +656,8 @@ impl Db {
         Ok((rows.filter_map(|r| r.ok()).collect(), page_count))
     }
 
-    /// 1-based rank of a player on the leaderboard, if they have an entry.
-    pub fn player_rank(&self, player_id: &str) -> Result<Option<usize>> {
+    /// 1-based rank and MMR of a player on the leaderboard, if they have an entry.
+    pub fn player_rank(&self, player_id: &str) -> Result<Option<(usize, i32)>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare("SELECT mmr,wins,streak,updated_at FROM leaderboard WHERE player_id = ?1")?;
@@ -670,7 +678,7 @@ impl Db {
             params![mmr, wins, streak, updated_at],
             |r| r.get(0),
         )?;
-        Ok(Some(count as usize + 1))
+        Ok(Some((count as usize + 1, mmr)))
     }
 }
 

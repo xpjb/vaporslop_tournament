@@ -219,8 +219,13 @@
       </div>
       <div class="lb-toolbar">
         <button id="lbTopBtn" class="ghost" type="button">⏶ top</button>
-        <button id="lbMeBtn" class="ghost" type="button">◎ me</button>
-        <span id="lbRankInfo" class="lb-rank-info dim">—</span>
+        <button id="lbMeBtn" class="ghost lb-me-btn" type="button">
+          <span id="lbMeAvatar" class="lb-me-avatar"></span>
+          <span class="lb-me-lines">
+            <span id="lbMeRank" class="lb-me-rank">no rank yet</span>
+            <span id="lbMeMmr" class="lb-me-mmr">—</span>
+          </span>
+        </button>
         <span class="lb-spacer"></span>
         <button id="lbUpBtn" class="ghost lb-arrow" type="button" aria-label="page up">▲</button>
         <button id="lbDownBtn" class="ghost lb-arrow" type="button" aria-label="page down">▼</button>
@@ -251,7 +256,7 @@
           </label>
           <button id="saveProfileBtn" class="primary" type="button">save</button>
         </div>
-        <div id="profileProgress" class="profile-progress dim"></div>
+        <ul id="profileStats" class="profile-stats" aria-label="profile stats"></ul>
         <div id="profileAccountSection" class="profile-account-section">
           <div id="profileAccountStatus" class="profile-account-status dim"></div>
           <div class="row controls profile-account-controls">

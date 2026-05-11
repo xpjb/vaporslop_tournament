@@ -61,6 +61,7 @@ const state = {
     pageCount: 1,
     perPage: LB_PAGE_SIZE,
     playerRank: null,
+    playerMmr: null,
     loading: false,
     pendingScroll: null, // "top" | "rank:<n>" | null
     open: false,
@@ -199,18 +200,17 @@ function renderProfileAccountControls() {
   const panel = $("#registerPanel");
   if (!status || !registerBtn || !logoutBtn || !panel) return;
   if (state.auth.signedIn && state.auth.username) {
-    status.textContent = `signed in as @${state.auth.username}`;
+    status.textContent = `@${state.auth.username}`;
     registerBtn.classList.add("hidden");
     logoutBtn.classList.remove("hidden");
     panel.classList.add("hidden");
   } else if (state.auth.hasAccount) {
-    // Edge case (shouldn't normally see profile modal here, but render sensibly)
-    status.textContent = `account: @${state.auth.username || ""} — signed out`;
+    status.textContent = `@${state.auth.username || ""} — signed out`;
     registerBtn.classList.add("hidden");
     logoutBtn.classList.add("hidden");
     panel.classList.add("hidden");
   } else {
-    status.textContent = "guest — your progress is tied to this browser. register to make it durable.";
+    status.textContent = "guest — register to save progress across devices.";
     registerBtn.classList.remove("hidden");
     logoutBtn.classList.add("hidden");
   }
@@ -560,10 +560,23 @@ function renderProfilePill() {
     modalImg.src = assetHref(profileAvatarDef(state.profileDraftAvatar || state.profile?.selected_avatar).sprite);
     modalImg.alt = profileAvatarDef(state.profileDraftAvatar || state.profile?.selected_avatar).name;
   }
-  const progress = $("#profileProgress");
-  if (progress) {
-    progress.textContent = `best reach: ${state.profile.best_wins || 0} wins · ultimate victories: ${state.profile.ultimate_victories || 0}`;
-  }
+  renderProfileStats();
+}
+
+function renderProfileStats() {
+  const stats = $("#profileStats");
+  if (!stats) return;
+  const mmr = state.run?.mmr ?? state.lb.playerMmr;
+  const rank = state.lb.playerRank;
+  const items = [
+    { label: "mmr", value: mmr != null ? mmr : "—" },
+    { label: "rank", value: rank != null ? `#${rank}` : "—" },
+    { label: "best", value: `${state.profile.best_wins || 0}w` },
+    { label: "ult ×", value: state.profile.ultimate_victories || 0 },
+  ];
+  stats.innerHTML = items.map((s) =>
+    `<li><span class="profile-stat-label">${s.label}</span><span class="profile-stat-value">${s.value}</span></li>`
+  ).join("");
 }
 
 function renderAvatarGrid() {
@@ -599,6 +612,14 @@ function openProfileModal() {
   closeRegisterPanel();
   $("#profileModal").classList.remove("hidden");
   $("#profileNameInput")?.focus();
+  // Refresh rank/mmr in the background; the leaderboard handler updates state
+  // even when the lb modal is closed.
+  send({
+    type: "leaderboard",
+    page: 1,
+    per_page: LB_PAGE_SIZE,
+    around_player_id: state.playerId,
+  });
 }
 
 function closeProfileModal() {
@@ -1374,17 +1395,18 @@ function loadLeaderboardPayload({ around = false } = {}) {
   state.lb.entries = [];
   state.lb.minPage = null;
   state.lb.maxPage = null;
+  const msg = {
+    type: "leaderboard",
+    per_page: LB_PAGE_SIZE,
+    around_player_id: state.playerId,
+  };
   if (around) {
     state.lb.pendingScroll = "me";
-    send({
-      type: "leaderboard",
-      per_page: LB_PAGE_SIZE,
-      around_player_id: state.playerId,
-    });
   } else {
     state.lb.pendingScroll = "top";
-    send({ type: "leaderboard", page: 1, per_page: LB_PAGE_SIZE });
+    msg.page = 1;
   }
+  send(msg);
 }
 
 function openLeaderboard({ around = false } = {}) {
@@ -1407,14 +1429,21 @@ function loadLbPage(page, position) {
   if (state.lb.minPage !== null && page >= state.lb.minPage && page <= state.lb.maxPage) return;
   state.lb.loading = true;
   state.lb.pendingScroll = position || null;
-  send({ type: "leaderboard", page, per_page: LB_PAGE_SIZE });
+  send({
+    type: "leaderboard",
+    page,
+    per_page: LB_PAGE_SIZE,
+    around_player_id: state.playerId,
+  });
 }
 
 function handleLeaderboardMsg(msg) {
   state.lb.loading = false;
   state.lb.pageCount = msg.page_count || 1;
   state.lb.perPage = msg.per_page || LB_PAGE_SIZE;
-  if (msg.player_rank != null) state.lb.playerRank = msg.player_rank;
+  state.lb.playerRank = msg.player_rank ?? null;
+  state.lb.playerMmr = msg.player_mmr ?? null;
+  renderProfileStats();
 
   if (!state.lb.open) {
     return;
@@ -1476,17 +1505,23 @@ function renderLeaderboardList() {
       </li>`;
     }).join("");
   }
-  $("#lbTopSentinel").classList.toggle("lb-sentinel--end", state.lb.minPage === 1);
+  const topSentinel = $("#lbTopSentinel");
+  if (state.lb.minPage === 1) {
+    topSentinel.textContent = "";
+    topSentinel.classList.add("hidden");
+  } else {
+    topSentinel.classList.remove("hidden");
+    topSentinel.textContent = "↑ scroll for higher ranks ↑";
+  }
   $("#lbBottomSentinel").classList.toggle("lb-sentinel--end", state.lb.maxPage >= state.lb.pageCount);
-  if (state.lb.minPage === 1) $("#lbTopSentinel").textContent = "✦ top of the ladder ✦";
-  else $("#lbTopSentinel").textContent = "↑ scroll for higher ranks ↑";
   if (state.lb.maxPage >= state.lb.pageCount) $("#lbBottomSentinel").textContent = "✦ end of the ladder ✦";
   else $("#lbBottomSentinel").textContent = "↓ scroll for lower ranks ↓";
-  const info = state.lb.playerRank
-    ? `your rank · #${state.lb.playerRank}`
-    : "no rank yet — finish a run";
-  $("#lbRankInfo").textContent = info;
-  $("#lbMeBtn").disabled = state.lb.playerRank == null;
+  const rank = state.lb.playerRank;
+  const mmr = state.run?.mmr ?? state.lb.playerMmr;
+  $("#lbMeAvatar").innerHTML = avatarImgHtml(state.profile.selected_avatar || DEFAULT_AVATAR_ID, "lb-me-avatar-img");
+  $("#lbMeRank").textContent = rank ? `#${rank}` : "no rank yet";
+  $("#lbMeMmr").textContent = mmr != null ? `${mmr} mmr` : "—";
+  $("#lbMeBtn").disabled = rank == null;
 }
 
 function populateGameOver(r, battleMsg) {

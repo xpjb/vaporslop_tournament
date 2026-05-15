@@ -26,6 +26,7 @@ function requestedReplayIdFromUrl() {
 
 const state = {
   ws: null,
+  defsVersion: 0,
   defs: { characters: [], items: [] },
   profileAvatars: [],
   consts: {},
@@ -180,6 +181,55 @@ async function fetchSharedReplay(replayId) {
   } catch {
     return { ok: false, status: 0, data: null };
   }
+}
+
+/** Cached `GET /api/defs` by version — immutable URLs, safe to retain for the session. */
+const defsTableHttpCache = new Map();
+
+async function fetchDefsTable(version) {
+  const v = Number(version);
+  if (!Number.isFinite(v) || v < 1) {
+    throw new Error("invalid defs version");
+  }
+  if (defsTableHttpCache.has(v)) return defsTableHttpCache.get(v);
+  const res = await fetch(`/api/defs?version=${encodeURIComponent(v)}`, {
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new Error(`defs ${res.status}`);
+  const table = await res.json();
+  defsTableHttpCache.set(v, table);
+  return table;
+}
+
+function mapsFromDefsTable(table) {
+  return {
+    units: table.units || {},
+    items: table.items || {},
+  };
+}
+
+function socketDefMaps() {
+  return {
+    units: Object.fromEntries((state.defs.characters || []).map((c) => [c.id, c])),
+    items: Object.fromEntries((state.defs.items || []).map((i) => [i.id, i])),
+  };
+}
+
+async function ensureDefMapsForBattle(msg) {
+  const wantRaw = msg.defs_version ?? msg.version;
+  const want = wantRaw != null ? Number(wantRaw) : null;
+  if (want != null && want >= 1 && want !== Number(state.defsVersion)) {
+    const t = await fetchDefsTable(want);
+    return mapsFromDefsTable(t);
+  }
+  return socketDefMaps();
+}
+
+function lookupsFromMaps(maps) {
+  return {
+    charDef: (id) => maps.units[id],
+    itemDef: (id) => maps.items[id],
+  };
 }
 
 async function registerAccount({ username, password }) {
@@ -773,7 +823,7 @@ function finishSharedReplayPlayback(battleMsg) {
   syncReplayLinkButtons();
 }
 
-function openSharedReplay(battleMsg) {
+async function openSharedReplay(battleMsg) {
   state.sharedReplay.activeId = battleMsg.replay_id;
   state.lastBattle = battleMsg;
   state.run = null;
@@ -787,18 +837,29 @@ function openSharedReplay(battleMsg) {
   $("#replayBattleBtn").classList.add("hidden");
   syncReplayLinkButtons();
   show("battle");
-  playBattle($("#battleCanvas"), battleMsg, charDef, itemDef, () => {
+
+  let maps;
+  try {
+    maps = await ensureDefMapsForBattle(battleMsg);
+  } catch {
+    flash("couldn't load game definitions for this replay", { variant: "error", duration: 3200 });
+    leaveSharedReplayMode();
+    if (state.auth.edgeCase) {
+      renderStartScreen();
+      show("start");
+    } else {
+      resumeRun(true);
+    }
+    return;
+  }
+
+  const lookups = lookupsFromMaps(maps);
+  playBattle($("#battleCanvas"), battleMsg, maps, () => {
     finishSharedReplayPlayback(battleMsg);
   }, {
-    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
+    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite, lookups)),
     hideTooltipNow,
   });
-  if (battleMsg.version_mismatch) {
-    flash("replay may differ slightly — combat rules changed since it was recorded", {
-      variant: "info",
-      duration: 4200,
-    });
-  }
 }
 
 function leaveSharedReplayMode() {
@@ -890,7 +951,7 @@ async function loadRequestedReplay() {
     }
     return false;
   }
-  openSharedReplay(res.data);
+  await openSharedReplay(res.data);
   return true;
 }
 
@@ -1152,6 +1213,7 @@ function handleServer(msg) {
     case "defs":
       state.defs.characters = msg.characters;
       state.defs.items = msg.items;
+      state.defsVersion = Number(msg.defs_version) || 0;
       state.profileAvatars = msg.profile_avatars || [];
       state.consts = msg.constants;
       $("#hudMaxLosses").textContent = msg.constants.max_losses;
@@ -1245,32 +1307,43 @@ function handleServer(msg) {
       $("#battleLog").innerHTML = "";
       state.battleAnimating = true;
       syncReplayLinkButtons();
-      playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
-        if (!isCurrentRunId(battleRunId)) return;
-        state.battleAnimating = false;
-        const log = (t) => {
-          const d = document.createElement("div");
-          d.textContent = t; $("#battleLog").appendChild(d); $("#battleLog").scrollTop = 1e9;
-        };
-        if (msg.winner === 0) log(`✦ you win — +$${state.consts.win_reward}`);
-        else if (msg.winner === 1) log(`✗ defeat — +$${state.consts.lose_reward}`);
-        else log(`— draw —`);
-        if (state.lastBattle && state.run) {
-          const m = state.lastBattle;
-          applyBattleSnapshot(m);
-          syncRunHudValues();
+      void (async () => {
+        let maps;
+        try {
+          maps = await ensureDefMapsForBattle(msg);
+        } catch {
+          state.battleAnimating = false;
+          flash("couldn't load definitions for battle playback", { variant: "error", duration: 3000 });
+          return;
         }
-        if (state.run?.phase !== "game_over") {
-          $("#nextRoundBtn").classList.remove("hidden");
-          $("#replayBattleBtn").classList.remove("hidden");
-          syncReplayLinkButtons();
-        } else {
-          renderRun();
-        }
-      }, {
-        showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-        hideTooltipNow,
-      });
+        const lookups = lookupsFromMaps(maps);
+        playBattle($("#battleCanvas"), msg, maps, () => {
+          if (!isCurrentRunId(battleRunId)) return;
+          state.battleAnimating = false;
+          const log = (t) => {
+            const d = document.createElement("div");
+            d.textContent = t; $("#battleLog").appendChild(d); $("#battleLog").scrollTop = 1e9;
+          };
+          if (msg.winner === 0) log(`✦ you win — +$${state.consts.win_reward}`);
+          else if (msg.winner === 1) log(`✗ defeat — +$${state.consts.lose_reward}`);
+          else log(`— draw —`);
+          if (state.lastBattle && state.run) {
+            const m = state.lastBattle;
+            applyBattleSnapshot(m);
+            syncRunHudValues();
+          }
+          if (state.run?.phase !== "game_over") {
+            $("#nextRoundBtn").classList.remove("hidden");
+            $("#replayBattleBtn").classList.remove("hidden");
+            syncReplayLinkButtons();
+          } else {
+            renderRun();
+          }
+        }, {
+          showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite, lookups)),
+          hideTooltipNow,
+        });
+      })();
       break;
     case "leaderboard":
       handleLeaderboardMsg(msg);
@@ -1679,8 +1752,12 @@ function enemyAuraTooltipSection(c) {
     <div class="tooltip-hint">From opposing living units with debuff auras.</div>`;
 }
 
-function combatantTooltip(c) {
-  const cd = charDef(c.def_id);
+function combatantTooltip(c, lookupsArg) {
+  const L = lookupsArg || {
+    charDef: (id) => charDef(id),
+    itemDef: (id) => itemDef(id),
+  };
+  const cd = L.charDef(c.def_id);
   const effMaxHp = (c.max_hp || 0) + (c.formation_hp_bonus || 0) + (c.per_ally_hp_bonus || 0);
   const base = cd ? Object.fromEntries(STAT_KEYS.map(({ key }) => [key, cd[key] || 0])) : {
     might: c.might || 0,
@@ -1703,7 +1780,7 @@ function combatantTooltip(c) {
   ].filter(([, id]) => id);
   const itemRows = itemIds.length
     ? itemIds.map(([slot, id]) => {
-      const item = itemDef(id);
+      const item = L.itemDef(id);
       return item ? `<div class="tooltip-equipped">${itemIcon(item)}<div><b>${escape(item.name)}</b>${propertyList(item.properties)}</div></div>` : "";
     }).join("")
     : `<div class="tooltip-empty">no equipped items</div>`;
@@ -1977,11 +2054,19 @@ function populateGameOver(r, battleMsg) {
     const key = `${r.id}:${battleMsg.events.length}`;
     if (state.gameOverReplayKey !== key) {
       state.gameOverReplayKey = key;
-      playBattle($("#goReplayCanvas"), battleMsg, charDef, itemDef, () => {}, {
-        showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-        hideTooltipNow,
-        loop: true,
-      });
+      void (async () => {
+        try {
+          const maps = await ensureDefMapsForBattle(battleMsg);
+          const lookups = lookupsFromMaps(maps);
+          playBattle($("#goReplayCanvas"), battleMsg, maps, () => {}, {
+            showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite, lookups)),
+            hideTooltipNow,
+            loop: true,
+          });
+        } catch {
+          // leave canvas idle if defs can't be resolved
+        }
+      })();
     }
   } else {
     wrap.classList.add("hidden");
@@ -2588,21 +2673,37 @@ $("#replayBattleBtn").onclick = () => {
   $("#replayBattleBtn").classList.add("hidden");
   syncReplayLinkButtons();
   const msg = state.lastBattle;
-  playBattle($("#battleCanvas"), msg, charDef, itemDef, () => {
-    if (isSharedReplayActive()) {
-      finishSharedReplayPlayback(msg);
+  void (async () => {
+    let maps;
+    try {
+      maps = await ensureDefMapsForBattle(msg);
+    } catch {
+      state.battleAnimating = false;
+      flash("couldn't load definitions for replay", { variant: "error", duration: 2800 });
+      if (state.run?.phase !== "game_over") {
+        $("#nextRoundBtn").classList.remove("hidden");
+        $("#replayBattleBtn").classList.remove("hidden");
+        syncReplayLinkButtons();
+      }
       return;
     }
-    state.battleAnimating = false;
-    if (state.run?.phase !== "game_over") {
-      $("#nextRoundBtn").classList.remove("hidden");
-      $("#replayBattleBtn").classList.remove("hidden");
-      syncReplayLinkButtons();
-    }
-  }, {
-    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-    hideTooltipNow,
-  });
+    const lookups = lookupsFromMaps(maps);
+    playBattle($("#battleCanvas"), msg, maps, () => {
+      if (isSharedReplayActive()) {
+        finishSharedReplayPlayback(msg);
+        return;
+      }
+      state.battleAnimating = false;
+      if (state.run?.phase !== "game_over") {
+        $("#nextRoundBtn").classList.remove("hidden");
+        $("#replayBattleBtn").classList.remove("hidden");
+        syncReplayLinkButtons();
+      }
+    }, {
+      showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite, lookups)),
+      hideTooltipNow,
+    });
+  })();
 };
 $("#copyReplayLinkBtn").onclick = () => {
   copyCurrentReplayLink();
@@ -2613,11 +2714,20 @@ $("#goReplayBtn").onclick = () => {
   const r = state.run;
   if (!r) return;
   state.gameOverReplayKey = `${r.id}:${state.lastBattle.events.length}`;
-  playBattle($("#goReplayCanvas"), state.lastBattle, charDef, itemDef, () => {}, {
-    showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite)),
-    hideTooltipNow,
-    loop: true,
-  });
+  const msg = state.lastBattle;
+  void (async () => {
+    try {
+      const maps = await ensureDefMapsForBattle(msg);
+      const lookups = lookupsFromMaps(maps);
+      playBattle($("#goReplayCanvas"), msg, maps, () => {}, {
+        showTooltip: (reference, sprite) => showTooltip(reference, combatantTooltip(sprite, lookups)),
+        hideTooltipNow,
+        loop: true,
+      });
+    } catch {
+      // ignore — mini replay stays blank
+    }
+  })();
 };
 $("#copyGoReplayLinkBtn").onclick = () => {
   copyCurrentReplayLink();

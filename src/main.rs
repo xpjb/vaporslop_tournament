@@ -8,7 +8,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -193,6 +193,7 @@ enum ClientMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMsg {
     Defs {
+        defs_version: u32,
         characters: Vec<CharacterDef>,
         items: Vec<ItemDef>,
         profile_avatars: Vec<ProfileAvatarDef>,
@@ -213,6 +214,7 @@ enum ServerMsg {
     Battle {
         run_id: String,
         replay_id: Option<i64>,
+        defs_version: u32,
         opponent_name: String,
         player_avatar: String,
         opponent_avatar: String,
@@ -271,6 +273,7 @@ struct LbEntry {
 #[derive(Debug, Serialize)]
 struct ReplayPayload {
     replay_id: i64,
+    version: u32,
     player_name: String,
     opponent_name: String,
     player_avatar: String,
@@ -280,7 +283,11 @@ struct ReplayPayload {
     events: Vec<game::combat::CombatEvent>,
     winner: Option<u8>,
     created_at: i64,
-    version_mismatch: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DefsApiQuery {
+    version: u32,
 }
 
 const DEFAULT_LEADERBOARD_PAGE_SIZE: usize = 10;
@@ -395,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .route("/api/whoami", get(whoami_handler))
         .route("/api/replay", get(replay_handler))
+        .route("/api/defs", get(defs_api_handler))
         .route("/api/replays", get(replays_list_handler))
         .route("/api/register", post(register_handler))
         .route("/api/login", post(login_handler))
@@ -465,6 +473,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
     send(
         &mut socket,
         &ServerMsg::Defs {
+            defs_version: live_defs.version().0,
             characters: live_defs.sorted_characters(),
             items: live_defs.sorted_items(),
             profile_avatars: profile_avatar_defs(),
@@ -1131,6 +1140,7 @@ async fn handle_run_action(
             Ok(Some(ServerMsg::Battle {
                 run_id: run.id.clone(),
                 replay_id: None,
+                defs_version: defs.version().0,
                 opponent_name: op_name,
                 player_avatar,
                 opponent_avatar,
@@ -1418,7 +1428,6 @@ async fn replay_handler(
         BattleOutcome::Loss => Some(1),
         BattleOutcome::Draw => None,
     };
-    let version_mismatch = replay.version_hash != state.defs.current_version().0;
     let replay_ver = DefsVersion(replay.version_hash);
     let (events, winner) = match state.defs.table_at(replay_ver) {
         None => (vec![], recorded_winner),
@@ -1437,6 +1446,7 @@ async fn replay_handler(
     };
     Json(ReplayPayload {
         replay_id: replay.id,
+        version: replay.version_hash,
         player_name,
         opponent_name,
         player_avatar,
@@ -1446,9 +1456,23 @@ async fn replay_handler(
         events,
         winner,
         created_at: replay.created_at,
-        version_mismatch,
     })
     .into_response()
+}
+
+async fn defs_api_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DefsApiQuery>,
+) -> axum::response::Response {
+    let Some(table) = state.defs.table_at(DefsVersion(q.version)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut resp = Json(table).into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    resp
 }
 
 const DEFAULT_REPLAYS_PAGE_SIZE: usize = 25;

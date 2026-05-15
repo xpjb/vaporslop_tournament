@@ -18,10 +18,11 @@ pub struct Defs {
     items: HashMap<String, Vec<(DefsVersion, ItemDef)>>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DefsTable {
-    version: DefsVersion,
-    units: HashMap<String, CharacterDef>,
-    items: HashMap<String, ItemDef>,
+    pub version: DefsVersion,
+    pub units: HashMap<String, CharacterDef>,
+    pub items: HashMap<String, ItemDef>,
 }
 
 /// Resolved snapshot of a [`Build`] pinned to a specific [`DefsTable`].
@@ -269,6 +270,21 @@ mod tests {
         let defs = Defs::load();
         assert!(defs.table_at(DefsVersion(99)).is_none());
         assert!(defs.table_at(DefsVersion(0)).is_none());
+    }
+
+    #[test]
+    fn defs_table_json_round_trip() {
+        let t = Defs::load().current_table();
+        let json = serde_json::to_string(&t).expect("serialize");
+        let back: DefsTable = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.version, t.version);
+        assert_eq!(back.units.len(), t.units.len());
+        assert_eq!(back.items.len(), t.items.len());
+        let id = "meme_man";
+        assert_eq!(
+            back.unit(id).map(|u| u.hp),
+            t.unit(id).map(|u| u.hp)
+        );
     }
 
     #[test]

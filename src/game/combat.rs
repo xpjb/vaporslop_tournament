@@ -1,29 +1,18 @@
-use crate::game::defs::{DefsTable, Team};
-use crate::game::defs::ResolvedMember;
+use crate::game::defs::{DefsTable, ResolvedMember, Team};
 use crate::game::rng::Rng;
 use crate::game::types::*;
 use serde::{Deserialize, Serialize};
 
-/// A combatant materialized for battle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Runtime battle participant (server-side). Not serialized over the wire; use [`CombatantSnapshot`] for JSON.
+#[derive(Debug, Clone)]
 pub struct Combatant {
     pub uid: u32, // unique id within battle
     pub def_id: String,
-    pub sprite: String,
     pub hat_id: Option<String>,
     pub left_hand_id: Option<String>,
     pub right_hand_id: Option<String>,
-    #[serde(default)]
     pub hand_3_id: Option<String>,
-    #[serde(default)]
     pub hand_4_id: Option<String>,
-    pub hat_sprite: Option<String>,
-    pub left_hand_sprite: Option<String>,
-    pub right_hand_sprite: Option<String>,
-    #[serde(default)]
-    pub hand_3_sprite: Option<String>,
-    #[serde(default)]
-    pub hand_4_sprite: Option<String>,
     /// Intrinsic max HP (def + gear); aura adds `formation_hp_bonus`.
     pub max_hp: i32,
     pub hp: i32,
@@ -33,20 +22,57 @@ pub struct Combatant {
     pub properties: Vec<Property>,
     pub frozen_turns: i32,
     pub side: u8, // 0 or 1
+    pub applied_front_might: i32,
+    pub applied_front_reflexes: i32,
+    pub applied_front_wisdom: i32,
+    pub formation_hp_bonus: i32,
+    pub applied_enemy_reflex_debuff: i32,
+    /// From gear (`ReviveOnce`); decremented when a revival triggers.
+    pub revive_charges: u8,
+    /// From gear (`ReviveAtBackOnce`); decremented when this revival triggers.
+    pub revive_at_back_charges: u8,
+    pub applied_per_ally_might: i32,
+    pub applied_per_ally_reflexes: i32,
+    pub applied_per_ally_wisdom: i32,
+    /// Like `formation_hp_bonus`: extra HP cap from the per-ally aura. Included in `effective_max_hp`.
+    pub per_ally_hp_bonus: i32,
+    /// Healers (`Property::Healer`) start battle with [`HEALER_MAX_MANA`] and spend 1 per heal.
+    pub mana: i32,
+    pub max_mana: i32,
+}
+
+/// Client-facing combatant snapshot: stable ids plus numeric/state fields; sprites resolved from defs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CombatantSnapshot {
+    pub uid: u32,
+    pub def_id: String,
+    pub hat_id: Option<String>,
+    pub left_hand_id: Option<String>,
+    pub right_hand_id: Option<String>,
     #[serde(default)]
-    applied_front_might: i32,
+    pub hand_3_id: Option<String>,
     #[serde(default)]
-    applied_front_reflexes: i32,
+    pub hand_4_id: Option<String>,
+    pub max_hp: i32,
+    pub hp: i32,
+    pub might: i32,
+    pub reflexes: i32,
+    pub wisdom: i32,
+    pub properties: Vec<Property>,
+    pub frozen_turns: i32,
+    pub side: u8,
     #[serde(default)]
-    applied_front_wisdom: i32,
+    pub applied_front_might: i32,
+    #[serde(default)]
+    pub applied_front_reflexes: i32,
+    #[serde(default)]
+    pub applied_front_wisdom: i32,
     #[serde(default)]
     pub formation_hp_bonus: i32,
     #[serde(default)]
     pub applied_enemy_reflex_debuff: i32,
-    /// From gear (`ReviveOnce`); decremented when a revival triggers.
     #[serde(default)]
     pub revive_charges: u8,
-    /// From gear (`ReviveAtBackOnce`); decremented when this revival triggers.
     #[serde(default)]
     pub revive_at_back_charges: u8,
     #[serde(default)]
@@ -55,14 +81,47 @@ pub struct Combatant {
     pub applied_per_ally_reflexes: i32,
     #[serde(default)]
     pub applied_per_ally_wisdom: i32,
-    /// Like `formation_hp_bonus`: extra HP cap from the per-ally aura. Included in `effective_max_hp`.
     #[serde(default)]
     pub per_ally_hp_bonus: i32,
-    /// Healers (`Property::Healer`) start battle with [`HEALER_MAX_MANA`] and spend 1 per heal.
     #[serde(default)]
     pub mana: i32,
     #[serde(default)]
     pub max_mana: i32,
+}
+
+impl From<&Combatant> for CombatantSnapshot {
+    fn from(c: &Combatant) -> Self {
+        CombatantSnapshot {
+            uid: c.uid,
+            def_id: c.def_id.clone(),
+            hat_id: c.hat_id.clone(),
+            left_hand_id: c.left_hand_id.clone(),
+            right_hand_id: c.right_hand_id.clone(),
+            hand_3_id: c.hand_3_id.clone(),
+            hand_4_id: c.hand_4_id.clone(),
+            max_hp: c.max_hp,
+            hp: c.hp,
+            might: c.might,
+            reflexes: c.reflexes,
+            wisdom: c.wisdom,
+            properties: c.properties.clone(),
+            frozen_turns: c.frozen_turns,
+            side: c.side,
+            applied_front_might: c.applied_front_might,
+            applied_front_reflexes: c.applied_front_reflexes,
+            applied_front_wisdom: c.applied_front_wisdom,
+            formation_hp_bonus: c.formation_hp_bonus,
+            applied_enemy_reflex_debuff: c.applied_enemy_reflex_debuff,
+            revive_charges: c.revive_charges,
+            revive_at_back_charges: c.revive_at_back_charges,
+            applied_per_ally_might: c.applied_per_ally_might,
+            applied_per_ally_reflexes: c.applied_per_ally_reflexes,
+            applied_per_ally_wisdom: c.applied_per_ally_wisdom,
+            per_ally_hp_bonus: c.per_ally_hp_bonus,
+            mana: c.mana,
+            max_mana: c.max_mana,
+        }
+    }
 }
 
 pub const HEALER_MAX_MANA: i32 = 20;
@@ -81,8 +140,8 @@ fn healer_mana_from_props(props: &[Property]) -> (i32, i32) {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CombatEvent {
     Start {
-        left: Vec<Combatant>,
-        right: Vec<Combatant>,
+        left: Vec<CombatantSnapshot>,
+        right: Vec<CombatantSnapshot>,
     },
     Attack {
         attacker: u32,
@@ -131,7 +190,7 @@ pub enum CombatEvent {
     Summon {
         side: u8,
         summoner: u32,
-        combatant: Combatant,
+        combatant: CombatantSnapshot,
     },
     /// Client sync after formation-front aura totals change.
     StatSync {
@@ -192,97 +251,85 @@ const MAX_BATTLE_TURNS: usize = 10_000;
 fn combatant_from_resolved(member: &ResolvedMember, side: u8, uid_start: &mut u32) -> Combatant {
     let def = &member.unit;
     let m = member;
-            let mut might = def.might;
-            let mut reflexes = def.reflexes;
-            let mut wisdom = def.wisdom;
-            let mut hp = def.hp;
-            let mut props = def.properties.clone();
-            let mut hat_sprite = None;
-            let mut left_hand_sprite = None;
-            let mut right_hand_sprite = None;
-            let mut hand_3_sprite = None;
-            let mut hand_4_sprite = None;
-            let mut hat_id = None;
-            let mut left_hand_id = None;
-            let mut right_hand_id = None;
-            let mut hand_3_id = None;
-            let mut hand_4_id = None;
-            for (slot_items, sprite_out, id_out) in [
-                (&m.hat, &mut hat_sprite, &mut hat_id),
-                (&m.left_hand, &mut left_hand_sprite, &mut left_hand_id),
-                (&m.right_hand, &mut right_hand_sprite, &mut right_hand_id),
-                (&m.hand_3, &mut hand_3_sprite, &mut hand_3_id),
-                (&m.hand_4, &mut hand_4_sprite, &mut hand_4_id),
-            ] {
-                if let Some(idef) = slot_items.as_ref() {
-                    *id_out = Some(idef.id.clone());
-                    *sprite_out = Some(idef.sprite.clone());
-                    for p in &idef.properties {
-                        if let Property::StatBonus {
-                            might: m_,
-                            reflexes: r_,
-                            wisdom: w_,
-                            hp: h_,
-                        } = p
-                        {
-                            might += m_;
-                            reflexes += r_;
-                            wisdom += w_;
-                            hp += h_;
-                        } else {
-                            props.push(p.clone());
-                        }
-                    }
+    let mut might = def.might;
+    let mut reflexes = def.reflexes;
+    let mut wisdom = def.wisdom;
+    let mut hp = def.hp;
+    let mut props = def.properties.clone();
+    let mut hat_id = None;
+    let mut left_hand_id = None;
+    let mut right_hand_id = None;
+    let mut hand_3_id = None;
+    let mut hand_4_id = None;
+    for (slot_items, id_out) in [
+        (&m.hat, &mut hat_id),
+        (&m.left_hand, &mut left_hand_id),
+        (&m.right_hand, &mut right_hand_id),
+        (&m.hand_3, &mut hand_3_id),
+        (&m.hand_4, &mut hand_4_id),
+    ] {
+        if let Some(idef) = slot_items.as_ref() {
+            *id_out = Some(idef.id.clone());
+            for p in &idef.properties {
+                if let Property::StatBonus {
+                    might: m_,
+                    reflexes: r_,
+                    wisdom: w_,
+                    hp: h_,
+                } = p
+                {
+                    might += m_;
+                    reflexes += r_;
+                    wisdom += w_;
+                    hp += h_;
+                } else {
+                    props.push(p.clone());
                 }
             }
-            let revive_charges = props
-                .iter()
-                .filter(|p| matches!(p, Property::ReviveOnce))
-                .count() as u8;
-            let revive_at_back_charges = props
-                .iter()
-                .filter(|p| matches!(p, Property::ReviveAtBackOnce))
-                .count() as u8;
-            props.retain(|p| !matches!(p, Property::ReviveOnce | Property::ReviveAtBackOnce));
-            let (mana, max_mana) = healer_mana_from_props(&props);
-            let uid = *uid_start;
-            *uid_start += 1;
-            Combatant {
-                uid,
-                def_id: def.id.clone(),
-                sprite: def.sprite.clone(),
-                hat_id,
-                left_hand_id,
-                right_hand_id,
-                hand_3_id,
-                hand_4_id,
-                hat_sprite,
-                left_hand_sprite,
-                right_hand_sprite,
-                hand_3_sprite,
-                hand_4_sprite,
-                max_hp: hp,
-                hp,
-                might,
-                reflexes,
-                wisdom,
-                properties: props,
-                frozen_turns: 0,
-                side,
-                applied_front_might: 0,
-                applied_front_reflexes: 0,
-                applied_front_wisdom: 0,
-                formation_hp_bonus: 0,
-                applied_enemy_reflex_debuff: 0,
-                revive_charges,
-                revive_at_back_charges,
-                applied_per_ally_might: 0,
-                applied_per_ally_reflexes: 0,
-                applied_per_ally_wisdom: 0,
-                per_ally_hp_bonus: 0,
-                mana,
-                max_mana,
-            }
+        }
+    }
+    let revive_charges = props
+        .iter()
+        .filter(|p| matches!(p, Property::ReviveOnce))
+        .count() as u8;
+    let revive_at_back_charges = props
+        .iter()
+        .filter(|p| matches!(p, Property::ReviveAtBackOnce))
+        .count() as u8;
+    props.retain(|p| !matches!(p, Property::ReviveOnce | Property::ReviveAtBackOnce));
+    let (mana, max_mana) = healer_mana_from_props(&props);
+    let uid = *uid_start;
+    *uid_start += 1;
+    Combatant {
+        uid,
+        def_id: def.id.clone(),
+        hat_id,
+        left_hand_id,
+        right_hand_id,
+        hand_3_id,
+        hand_4_id,
+        max_hp: hp,
+        hp,
+        might,
+        reflexes,
+        wisdom,
+        properties: props,
+        frozen_turns: 0,
+        side,
+        applied_front_might: 0,
+        applied_front_reflexes: 0,
+        applied_front_wisdom: 0,
+        formation_hp_bonus: 0,
+        applied_enemy_reflex_debuff: 0,
+        revive_charges,
+        revive_at_back_charges,
+        applied_per_ally_might: 0,
+        applied_per_ally_reflexes: 0,
+        applied_per_ally_wisdom: 0,
+        per_ally_hp_bonus: 0,
+        mana,
+        max_mana,
+    }
 }
 
 fn build_side(team: &Team, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
@@ -687,17 +734,11 @@ fn summon_on_enemy_death(
                             Combatant {
                                 uid,
                                 def_id: def.id.clone(),
-                                sprite: def.sprite.clone(),
                                 hat_id: None,
                                 left_hand_id: None,
                                 right_hand_id: None,
                                 hand_3_id: None,
                                 hand_4_id: None,
-                                hat_sprite: None,
-                                left_hand_sprite: None,
-                                right_hand_sprite: None,
-                                hand_3_sprite: None,
-                                hand_4_sprite: None,
                                 max_hp: def.hp,
                                 hp: def.hp,
                                 might: def.might,
@@ -731,7 +772,7 @@ fn summon_on_enemy_death(
         events.push(CombatEvent::Summon {
             side: attacker_side,
             summoner: summoner_uid,
-            combatant: s.clone(),
+            combatant: CombatantSnapshot::from(&s),
         });
         if let Some(idx) = actors.iter().position(|c| c.uid == summoner_uid) {
             actors.insert(idx, s);
@@ -767,17 +808,11 @@ fn summon_on_ally_death(
                             Combatant {
                                 uid,
                                 def_id: def.id.clone(),
-                                sprite: def.sprite.clone(),
                                 hat_id: None,
                                 left_hand_id: None,
                                 right_hand_id: None,
                                 hand_3_id: None,
                                 hand_4_id: None,
-                                hat_sprite: None,
-                                left_hand_sprite: None,
-                                right_hand_sprite: None,
-                                hand_3_sprite: None,
-                                hand_4_sprite: None,
                                 max_hp: def.hp,
                                 hp: def.hp,
                                 might: def.might,
@@ -811,7 +846,7 @@ fn summon_on_ally_death(
         events.push(CombatEvent::Summon {
             side: dead_side,
             summoner: summoner_uid,
-            combatant: s.clone(),
+            combatant: CombatantSnapshot::from(&s),
         });
         if let Some(idx) = foes.iter().position(|c| c.uid == summoner_uid) {
             foes.insert(idx, s);
@@ -1178,8 +1213,8 @@ pub fn resolve_v1(
     refresh_per_ally_aura(&mut right, None);
     refresh_enemy_reflex_debuffs(&mut left, &mut right, None);
     let mut events = vec![CombatEvent::Start {
-        left: left.clone(),
-        right: right.clone(),
+        left: left.iter().map(CombatantSnapshot::from).collect(),
+        right: right.iter().map(CombatantSnapshot::from).collect(),
     }];
     let mut simultaneous_group_counter = 1u32;
 
@@ -1468,17 +1503,11 @@ mod tests {
         Combatant {
             uid,
             def_id: def_id.into(),
-            sprite: "test.webp".into(),
             hat_id: None,
             left_hand_id: None,
             right_hand_id: None,
             hand_3_id: None,
             hand_4_id: None,
-            hat_sprite: None,
-            left_hand_sprite: None,
-            right_hand_sprite: None,
-            hand_3_sprite: None,
-            hand_4_sprite: None,
             max_hp: 20,
             hp,
             might: 1,

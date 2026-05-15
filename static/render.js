@@ -15,6 +15,26 @@ function img(src) {
   imgCache.set(src, i); return i;
 }
 
+/** Resolve sprite filenames from defs table (wire payloads omit them). */
+function hydrateCombatantSnapshot(snap, units, items) {
+  const u = units[snap.def_id];
+  const fallbackSprite = "Meme_Man.webp";
+  const unitSprite = u?.sprite || fallbackSprite;
+  const itemSpr = (id) => {
+    const it = id && items[id];
+    return it?.sprite ?? null;
+  };
+  return {
+    ...snap,
+    sprite: unitSprite,
+    hat_sprite: itemSpr(snap.hat_id),
+    left_hand_sprite: itemSpr(snap.left_hand_id),
+    right_hand_sprite: itemSpr(snap.right_hand_id),
+    hand_3_sprite: itemSpr(snap.hand_3_id),
+    hand_4_sprite: itemSpr(snap.hand_4_id),
+  };
+}
+
 class Sprite {
   constructor(c) {
     this.uid = c.uid;
@@ -462,13 +482,14 @@ function groupSimultaneousAttacks(rawEvents) {
   return grouped;
 }
 
-export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip = {}) {
+export function playBattle(canvas, battleMsg, defMaps, onDone, tooltip = {}) {
   if (canvas.__battleTooltipCleanup) canvas.__battleTooltipCleanup();
   let rafId = null;
   let cancelled = false;
   const loopReplay = !!tooltip.loop;
   const ctx = canvas.getContext("2d");
   const events = groupSimultaneousAttacks(battleMsg.events);
+  const { units, items } = defMaps || { units: {}, items: {} };
   const spritesById = new Map();
   let leftList = [], rightList = [];
   let projectiles = [];
@@ -684,8 +705,8 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
   function applyEvent(ev) {
     switch (ev.type) {
       case "start":
-        leftList = ev.left.map(c => new Sprite(c));
-        rightList = ev.right.map(c => new Sprite(c));
+        leftList = ev.left.map(c => new Sprite(hydrateCombatantSnapshot(c, units, items)));
+        rightList = ev.right.map(c => new Sprite(hydrateCombatantSnapshot(c, units, items)));
         leftList.forEach(s => spritesById.set(s.uid, s));
         rightList.forEach(s => spritesById.set(s.uid, s));
         layout(leftList, rightList, canvas);
@@ -975,7 +996,7 @@ export function playBattle(canvas, battleMsg, charDef, itemDef, onDone, tooltip 
         break;
       }
       case "summon": {
-        const s = new Sprite(ev.combatant);
+        const s = new Sprite(hydrateCombatantSnapshot(ev.combatant, units, items));
         spritesById.set(s.uid, s);
         const list = ev.side === 0 ? leftList : rightList;
         const summoner = spritesById.get(ev.summoner);

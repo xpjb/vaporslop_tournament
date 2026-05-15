@@ -50,7 +50,11 @@
     <div class="header-top">
       <div class="header-left">
         <div class="title-stack">
-          <h1>VAPORSLOP <span class="dim">// T O U R N A M E N T</span></h1>
+          <h1 class="site-title-heading">
+            <button type="button" id="siteTitleBtn" class="site-title-btn" aria-label="home — return to arcade">
+              VAPORSLOP <span class="dim">// T O U R N A M E N T</span>
+            </button>
+          </h1>
           <div class="profile-actions">
             <button id="profilePill" class="profile-pill" type="button" aria-haspopup="dialog">
               <span class="profile-avatar profile-avatar--small">
@@ -80,6 +84,7 @@
               <span><b id="statLoggedToday">—</b> today</span>
             </p>
             <button id="openLbBtn" class="lb-pill" type="button" aria-haspopup="dialog">★ leaderboard</button>
+            <button id="openReplaysBtn" class="lb-pill" type="button" aria-haspopup="dialog">▷ replays</button>
           </div>
         </div>
       </div>
@@ -236,6 +241,27 @@
         <div id="lbTopSentinel" class="lb-sentinel">↑ scroll for higher ranks ↑</div>
         <ol id="lbList" class="lb-list"></ol>
         <div id="lbBottomSentinel" class="lb-sentinel">↓ scroll for lower ranks ↓</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="replaysModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="replaysModalTitle">
+    <div class="modal-backdrop" data-close-replays-modal></div>
+    <div class="modal-panel lb-panel">
+      <div class="lb-header">
+        <h2 id="replaysModalTitle">▷ replays ▷</h2>
+        <button id="replaysCloseBtn" class="lb-close" type="button" aria-label="close">✕</button>
+      </div>
+      <div class="lb-toolbar replays-toolbar" role="tablist" aria-label="replay scope">
+        <button id="replaysTabAll" class="replays-tab replays-tab--active" type="button" role="tab" aria-selected="true">firehose</button>
+        <button id="replaysTabMine" class="replays-tab" type="button" role="tab" aria-selected="false">mine</button>
+        <span class="lb-spacer"></span>
+        <button id="replaysPrevBtn" class="ghost lb-arrow" type="button" aria-label="newer page">▲</button>
+        <button id="replaysNextBtn" class="ghost lb-arrow" type="button" aria-label="older page">▼</button>
+      </div>
+      <div id="replaysScroll" class="lb-scroll replays-scroll" tabindex="0">
+        <ol id="replaysList" class="lb-list replays-list"></ol>
+        <div id="replaysStatus" class="lb-sentinel"></div>
       </div>
     </div>
   </div>

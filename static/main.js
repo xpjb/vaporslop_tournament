@@ -77,6 +77,14 @@ const state = {
     activeId: null,
     loading: false,
   },
+  replaysBrowser: {
+    open: false,
+    scope: "all", // "all" | "mine"
+    page: 1,
+    pageCount: 1,
+    entries: [],
+    loading: false,
+  },
 };
 
 function isCurrentRunId(runId) {
@@ -808,6 +816,36 @@ function leaveSharedReplayMode() {
   syncReplayLinkButtons();
 }
 
+function closeAllAppModals() {
+  closeQuitRunModal();
+  closeHelpModal();
+  closeProfileModal();
+  if (state.lb.open) closeLeaderboard();
+  if (state.replaysBrowser.open) closeReplaysBrowser();
+}
+
+/** Soft navigation to app root: clears `?replay=`, exits shared replay, restores normal flow (no full page load). */
+function softNavToAppRoot() {
+  closeAllAppModals();
+  const replayInUrl = requestedReplayIdFromUrl();
+  if (isSharedReplayActive() || state.sharedReplay.requestedId != null || replayInUrl != null) {
+    leaveSharedReplayMode();
+    show("start");
+    if (state.auth.edgeCase) {
+      renderStartScreen();
+    } else {
+      resumeRun(true);
+    }
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (url.searchParams.has("replay")) {
+    url.searchParams.delete("replay");
+    history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -854,6 +892,168 @@ async function loadRequestedReplay() {
   }
   openSharedReplay(res.data);
   return true;
+}
+
+function relativeTimeShort(unixSecs) {
+  if (!Number.isFinite(unixSecs) || unixSecs <= 0) return "";
+  const diffMs = Date.now() - unixSecs * 1000;
+  const sec = Math.max(0, Math.round(diffMs / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  const mon = Math.round(day / 30);
+  if (mon < 12) return `${mon}mo ago`;
+  const yr = Math.round(mon / 12);
+  return `${yr}y ago`;
+}
+
+function outcomeLabel(outcome) {
+  switch (outcome) {
+    case "win": return "W";
+    case "loss": return "L";
+    case "draw": return "D";
+    default: return "?";
+  }
+}
+
+async function fetchReplaysList({ scope, page, perPage }) {
+  const params = new URLSearchParams();
+  params.set("scope", scope);
+  params.set("page", String(page));
+  params.set("per_page", String(perPage));
+  if (scope === "mine") params.set("player_id", state.playerId || "");
+  try {
+    const res = await fetch(`/api/replays?${params.toString()}`, { credentials: "same-origin" });
+    let data = null;
+    try { data = await res.json(); } catch { /* noop */ }
+    return { ok: res.ok, status: res.status, data };
+  } catch {
+    return { ok: false, status: 0, data: null };
+  }
+}
+
+async function loadReplaysBrowser({ page = 1 } = {}) {
+  if (state.replaysBrowser.loading) return;
+  state.replaysBrowser.loading = true;
+  state.replaysBrowser.page = page;
+  renderReplaysBrowser();
+  const res = await fetchReplaysList({
+    scope: state.replaysBrowser.scope,
+    page,
+    perPage: 25,
+  });
+  state.replaysBrowser.loading = false;
+  if (!res.ok || !res.data) {
+    state.replaysBrowser.entries = [];
+    state.replaysBrowser.pageCount = 1;
+    renderReplaysBrowser({ error: true });
+    return;
+  }
+  state.replaysBrowser.entries = res.data.entries || [];
+  state.replaysBrowser.pageCount = res.data.page_count || 1;
+  state.replaysBrowser.page = res.data.page || page;
+  renderReplaysBrowser();
+}
+
+function renderReplaysBrowser({ error = false } = {}) {
+  const list = $("#replaysList");
+  const status = $("#replaysStatus");
+  if (!list) return;
+  const me = state.playerId;
+  const { entries, loading, scope, page, pageCount } = state.replaysBrowser;
+  $("#replaysTabAll")?.classList.toggle("replays-tab--active", scope === "all");
+  $("#replaysTabAll")?.setAttribute("aria-selected", scope === "all" ? "true" : "false");
+  $("#replaysTabMine")?.classList.toggle("replays-tab--active", scope === "mine");
+  $("#replaysTabMine")?.setAttribute("aria-selected", scope === "mine" ? "true" : "false");
+  $("#replaysPrevBtn").disabled = loading || page <= 1;
+  $("#replaysNextBtn").disabled = loading || page >= pageCount;
+  if (loading && entries.length === 0) {
+    list.innerHTML = "";
+    status.textContent = "loading…";
+    status.classList.remove("hidden");
+    return;
+  }
+  if (error) {
+    list.innerHTML = "";
+    status.textContent = "couldn't load replays";
+    status.classList.remove("hidden");
+    return;
+  }
+  if (!entries.length) {
+    list.innerHTML = "";
+    status.textContent = scope === "mine"
+      ? "no replays yet — play a few rounds and they'll show up here"
+      : "no replays yet";
+    status.classList.remove("hidden");
+    return;
+  }
+  list.innerHTML = entries.map((e) => {
+    const playerIsMe = e.player_id && e.player_id === me;
+    const enemyIsMe = e.enemy_player_id && e.enemy_player_id === me;
+    const mineClass = playerIsMe || enemyIsMe ? " replay-row--me" : "";
+    const outcomeClass = `replay-outcome--${e.outcome}`;
+    const youBadge = (isMe) => isMe ? ' <span class="lb-you">you</span>' : "";
+    return `<li class="lb-row replay-row${mineClass}" data-replay-id="${e.id}" tabindex="0" role="button" aria-label="watch replay ${e.id}">
+      <span class="replay-outcome ${outcomeClass}">${outcomeLabel(e.outcome)}</span>
+      <span class="replay-vs">
+        <span class="replay-side">
+          ${avatarImgHtml(e.player_avatar, "replay-avatar")}
+          <span class="replay-side-text">
+            <span class="replay-name">${escape(e.player_name || "anon")}${youBadge(playerIsMe)}</span>
+            <span class="replay-mmr">${e.player_mmr_before} mmr</span>
+          </span>
+        </span>
+        <span class="replay-vs-sep">vs</span>
+        <span class="replay-side replay-side--right">
+          ${avatarImgHtml(e.enemy_avatar, "replay-avatar")}
+          <span class="replay-side-text">
+            <span class="replay-name">${escape(e.enemy_name || "anon")}${youBadge(enemyIsMe)}</span>
+            <span class="replay-mmr">${e.enemy_mmr_before} mmr</span>
+          </span>
+        </span>
+      </span>
+      <span class="replay-when dim">${escape(relativeTimeShort(e.created_at))}</span>
+    </li>`;
+  }).join("");
+  status.textContent = pageCount > 1 ? `page ${page} / ${pageCount}` : "";
+  status.classList.toggle("hidden", !status.textContent);
+}
+
+function openReplaysBrowser() {
+  $("#replaysModal").classList.remove("hidden");
+  state.replaysBrowser.open = true;
+  $("#replaysCloseBtn")?.focus();
+  loadReplaysBrowser({ page: 1 });
+}
+
+function closeReplaysBrowser() {
+  $("#replaysModal").classList.add("hidden");
+  state.replaysBrowser.open = false;
+}
+
+function setReplaysScope(scope) {
+  if (scope !== "all" && scope !== "mine") return;
+  if (state.replaysBrowser.scope === scope) return;
+  state.replaysBrowser.scope = scope;
+  state.replaysBrowser.entries = [];
+  loadReplaysBrowser({ page: 1 });
+}
+
+function watchReplayFromList(replayId) {
+  if (!Number.isInteger(replayId) || replayId <= 0) return;
+  closeReplaysBrowser();
+  if (state.sharedReplay.activeId) {
+    leaveSharedReplayMode();
+  }
+  state.sharedReplay.requestedId = replayId;
+  const url = new URL(window.location.href);
+  url.searchParams.set("replay", String(replayId));
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  loadRequestedReplay();
 }
 
 function showSessionReplacedBanner() {
@@ -2252,6 +2452,7 @@ $("#bgmVolume").addEventListener("input", (e) => setBgmVolume(e.currentTarget.va
 window.addEventListener("pointerdown", startBgm, { once: true });
 window.addEventListener("keydown", startBgm, { once: true });
 $("#profilePill").onclick = openProfileModal;
+$("#siteTitleBtn")?.addEventListener("click", softNavToAppRoot);
 $("#helpBtn").onclick = openHelpModal;
 $("#profileCloseBtn").onclick = closeProfileModal;
 $("#helpCloseBtn").onclick = closeHelpModal;
@@ -2266,6 +2467,35 @@ $("#newRunBtn").onclick = () => {
 };
 $("#openLbBtn").onclick = () => openLeaderboard();
 $("#lbCloseBtn").onclick = closeLeaderboard;
+$("#openReplaysBtn")?.addEventListener("click", openReplaysBrowser);
+$("#replaysCloseBtn")?.addEventListener("click", closeReplaysBrowser);
+$("#replaysModal")?.addEventListener("click", (e) => {
+  if (e.target.matches("[data-close-replays-modal]")) closeReplaysBrowser();
+});
+$("#replaysTabAll")?.addEventListener("click", () => setReplaysScope("all"));
+$("#replaysTabMine")?.addEventListener("click", () => setReplaysScope("mine"));
+$("#replaysPrevBtn")?.addEventListener("click", () => {
+  if (state.replaysBrowser.page > 1) loadReplaysBrowser({ page: state.replaysBrowser.page - 1 });
+});
+$("#replaysNextBtn")?.addEventListener("click", () => {
+  if (state.replaysBrowser.page < state.replaysBrowser.pageCount) {
+    loadReplaysBrowser({ page: state.replaysBrowser.page + 1 });
+  }
+});
+$("#replaysList")?.addEventListener("click", (e) => {
+  const row = e.target.closest("[data-replay-id]");
+  if (!row) return;
+  const id = Number.parseInt(row.dataset.replayId, 10);
+  if (Number.isInteger(id) && id > 0) watchReplayFromList(id);
+});
+$("#replaysList")?.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const row = e.target.closest("[data-replay-id]");
+  if (!row) return;
+  e.preventDefault();
+  const id = Number.parseInt(row.dataset.replayId, 10);
+  if (Number.isInteger(id) && id > 0) watchReplayFromList(id);
+});
 $("#lbModal").addEventListener("click", (e) => {
   if (e.target.matches("[data-close-lb-modal]")) closeLeaderboard();
 });
@@ -2332,6 +2562,8 @@ window.addEventListener("keydown", (e) => {
     closeProfileModal();
   } else if (e.key === "Escape" && state.lb.open) {
     closeLeaderboard();
+  } else if (e.key === "Escape" && state.replaysBrowser.open) {
+    closeReplaysBrowser();
   }
 });
 $("#nextRoundBtn").onclick = () => {

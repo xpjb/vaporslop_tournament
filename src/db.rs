@@ -71,6 +71,24 @@ pub struct ReplayRecord {
     pub created_at: i64,
 }
 
+/// Lightweight replay listing row: enough to render the firehose/history list
+/// without loading the full builds. Click-through fetches the full replay via
+/// `replay_record`.
+#[derive(Debug, Clone)]
+pub struct ReplaySummary {
+    pub id: i64,
+    pub player_id: String,
+    pub player_name: String,
+    pub player_avatar: String,
+    pub player_mmr_before: i32,
+    pub enemy_player_id: String,
+    pub enemy_name: String,
+    pub enemy_avatar: String,
+    pub enemy_mmr_before: i32,
+    pub outcome: BattleOutcome,
+    pub created_at: i64,
+}
+
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -809,6 +827,121 @@ impl Db {
             outcome,
             created_at: row.get(10)?,
         }))
+    }
+
+    /// Paginated replay listing. When `filter_player_id` is `Some`, only returns
+    /// battles that player appeared in (on either side); otherwise returns every
+    /// battle (the firehose). For filtered queries we normalize each row so the
+    /// filtered player is always the "player" side and the outcome is from their
+    /// perspective — the caller can render `mine` rows uniformly without
+    /// reasoning about which slot they were in.
+    pub fn replays_list(
+        &self,
+        filter_player_id: Option<&str>,
+        page: usize,
+        per_page: usize,
+    ) -> Result<(Vec<ReplaySummary>, usize)> {
+        let conn = self.conn.lock();
+        let filter = filter_player_id.unwrap_or("");
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM battles b
+             JOIN opponents p ON p.id = b.player_opponent_id
+             JOIN opponents e ON e.id = b.enemy_opponent_id
+             WHERE ?1 = '' OR p.player_id = ?1 OR e.player_id = ?1",
+            params![filter],
+            |r| r.get(0),
+        )?;
+        let page_count = if total == 0 {
+            1
+        } else {
+            ((total as usize) + per_page - 1) / per_page
+        };
+        let page = page.clamp(1, page_count);
+        let offset = (page - 1) * per_page;
+        let mut stmt = conn.prepare(
+            "SELECT b.id,
+                    p.player_id, COALESCE(pp.name, 'anon'), COALESCE(pp.selected_avatar, 'meme_man'),
+                    e.player_id, COALESCE(ep.name, 'anon'), COALESCE(ep.selected_avatar, 'meme_man'),
+                    b.player_mmr_before, e.mmr_at_snapshot,
+                    b.outcome, b.created_at
+             FROM battles b
+             JOIN opponents p ON p.id = b.player_opponent_id
+             JOIN opponents e ON e.id = b.enemy_opponent_id
+             LEFT JOIN player_profiles pp ON pp.player_id = p.player_id
+             LEFT JOIN player_profiles ep ON ep.player_id = e.player_id
+             WHERE ?1 = '' OR p.player_id = ?1 OR e.player_id = ?1
+             ORDER BY b.id DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(params![filter, per_page as i64, offset as i64], |r| {
+            let id: i64 = r.get(0)?;
+            let p_id: String = r.get(1)?;
+            let p_name: String = r.get(2)?;
+            let p_avatar: String = r.get(3)?;
+            let e_id: String = r.get(4)?;
+            let e_name: String = r.get(5)?;
+            let e_avatar: String = r.get(6)?;
+            let p_mmr: i32 = r.get(7)?;
+            let e_mmr: i32 = r.get(8)?;
+            let outcome_raw: String = r.get(9)?;
+            let created_at: i64 = r.get(10)?;
+            Ok((
+                id, p_id, p_name, p_avatar, e_id, e_name, e_avatar, p_mmr, e_mmr, outcome_raw,
+                created_at,
+            ))
+        })?;
+        let mut out: Vec<ReplaySummary> = Vec::new();
+        for row in rows {
+            let (id, p_id, p_name, p_avatar, e_id, e_name, e_avatar, p_mmr, e_mmr, raw, created_at) =
+                match row {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+            let outcome = match BattleOutcome::from_str(&raw) {
+                Some(o) => o,
+                None => continue,
+            };
+            // Normalize perspective: if we're filtering for a player and they're
+            // on the enemy slot of this row, swap sides and flip the outcome so
+            // the player is always shown on the "player" side.
+            let flip = !filter.is_empty() && e_id == filter && p_id != filter;
+            let summary = if flip {
+                ReplaySummary {
+                    id,
+                    player_id: e_id,
+                    player_name: e_name,
+                    player_avatar: e_avatar,
+                    player_mmr_before: e_mmr,
+                    enemy_player_id: p_id,
+                    enemy_name: p_name,
+                    enemy_avatar: p_avatar,
+                    enemy_mmr_before: p_mmr,
+                    outcome: match outcome {
+                        BattleOutcome::Win => BattleOutcome::Loss,
+                        BattleOutcome::Loss => BattleOutcome::Win,
+                        BattleOutcome::Draw => BattleOutcome::Draw,
+                    },
+                    created_at,
+                }
+            } else {
+                ReplaySummary {
+                    id,
+                    player_id: p_id,
+                    player_name: p_name,
+                    player_avatar: p_avatar,
+                    player_mmr_before: p_mmr,
+                    enemy_player_id: e_id,
+                    enemy_name: e_name,
+                    enemy_avatar: e_avatar,
+                    enemy_mmr_before: e_mmr,
+                    outcome,
+                    created_at,
+                }
+            };
+            out.push(summary);
+        }
+        Ok((out, page_count))
     }
 
     #[cfg(test)]

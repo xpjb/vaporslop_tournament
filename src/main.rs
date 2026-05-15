@@ -392,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .route("/api/whoami", get(whoami_handler))
         .route("/api/replay", get(replay_handler))
+        .route("/api/replays", get(replays_list_handler))
         .route("/api/register", post(register_handler))
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
@@ -1423,6 +1424,101 @@ async fn replay_handler(
         },
         created_at: replay.created_at,
         version_mismatch,
+    })
+    .into_response()
+}
+
+const DEFAULT_REPLAYS_PAGE_SIZE: usize = 25;
+const MAX_REPLAYS_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Deserialize)]
+struct ReplaysListQuery {
+    scope: Option<String>,
+    player_id: Option<String>,
+    page: Option<usize>,
+    per_page: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplayListEntry {
+    id: i64,
+    player_id: String,
+    player_name: String,
+    player_avatar: String,
+    player_mmr_before: i32,
+    enemy_player_id: String,
+    enemy_name: String,
+    enemy_avatar: String,
+    enemy_mmr_before: i32,
+    outcome: &'static str,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplaysListPayload {
+    entries: Vec<ReplayListEntry>,
+    page: usize,
+    page_count: usize,
+    per_page: usize,
+    scope: &'static str,
+}
+
+async fn replays_list_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ReplaysListQuery>,
+) -> axum::response::Response {
+    let scope = q.scope.as_deref().unwrap_or("all");
+    let per_page = q
+        .per_page
+        .unwrap_or(DEFAULT_REPLAYS_PAGE_SIZE)
+        .clamp(1, MAX_REPLAYS_PAGE_SIZE);
+    let page = q.page.unwrap_or(1).max(1);
+    let (filter, scope_label): (Option<&str>, &'static str) = match scope {
+        "mine" => {
+            let Some(pid) = q.player_id.as_deref().filter(|s| !s.is_empty()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "player_id_required" })),
+                )
+                    .into_response();
+            };
+            (Some(pid), "mine")
+        }
+        _ => (None, "all"),
+    };
+    let (rows, page_count) = match state.db.replays_list(filter, page, per_page) {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::error!("replays_list: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "server_error" })),
+            )
+                .into_response();
+        }
+    };
+    let entries: Vec<ReplayListEntry> = rows
+        .into_iter()
+        .map(|r| ReplayListEntry {
+            id: r.id,
+            player_id: r.player_id,
+            player_name: r.player_name,
+            player_avatar: r.player_avatar,
+            player_mmr_before: r.player_mmr_before,
+            enemy_player_id: r.enemy_player_id,
+            enemy_name: r.enemy_name,
+            enemy_avatar: r.enemy_avatar,
+            enemy_mmr_before: r.enemy_mmr_before,
+            outcome: r.outcome.as_str(),
+            created_at: r.created_at,
+        })
+        .collect();
+    Json(ReplaysListPayload {
+        entries,
+        page: page.min(page_count),
+        page_count,
+        per_page,
+        scope: scope_label,
     })
     .into_response()
 }

@@ -237,17 +237,13 @@ pub struct Build {
 }
 
 impl Build {
-    pub fn cost_value(&self) -> i32 {
+    pub fn cost_value(&self, defs: &crate::game::defs::DefsTable) -> i32 {
         self.team
             .iter()
             .map(|m| {
-                let mut c = crate::game::data::character_def(&m.def_id)
-                    .map(|d| d.cost)
-                    .unwrap_or(0);
+                let mut c = defs.unit(&m.def_id).map(|d| d.cost).unwrap_or(0);
                 for iid in m.item_ids() {
-                    c += crate::game::data::item_def(iid)
-                        .map(|d| d.cost)
-                        .unwrap_or(0);
+                    c += defs.item(iid).map(|d| d.cost).unwrap_or(0);
                 }
                 c
             })

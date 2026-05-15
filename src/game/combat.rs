@@ -1,4 +1,5 @@
-use crate::game::data::*;
+use crate::game::defs::{DefsTable, Team};
+use crate::game::defs::ResolvedMember;
 use crate::game::rng::Rng;
 use crate::game::types::*;
 use serde::{Deserialize, Serialize};
@@ -188,12 +189,9 @@ pub struct BattleResult {
 
 const MAX_BATTLE_TURNS: usize = 10_000;
 
-fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
-    build
-        .team
-        .iter()
-        .filter_map(|m| {
-            let def = character_def(&m.def_id)?;
+fn combatant_from_resolved(member: &ResolvedMember, side: u8, uid_start: &mut u32) -> Combatant {
+    let def = &member.unit;
+    let m = member;
             let mut might = def.might;
             let mut reflexes = def.reflexes;
             let mut wisdom = def.wisdom;
@@ -209,32 +207,30 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
             let mut right_hand_id = None;
             let mut hand_3_id = None;
             let mut hand_4_id = None;
-            for (slot_id, sprite_out, id_out) in [
+            for (slot_items, sprite_out, id_out) in [
                 (&m.hat, &mut hat_sprite, &mut hat_id),
                 (&m.left_hand, &mut left_hand_sprite, &mut left_hand_id),
                 (&m.right_hand, &mut right_hand_sprite, &mut right_hand_id),
                 (&m.hand_3, &mut hand_3_sprite, &mut hand_3_id),
                 (&m.hand_4, &mut hand_4_sprite, &mut hand_4_id),
             ] {
-                if let Some(iid) = slot_id {
-                    *id_out = Some(iid.clone());
-                    if let Some(idef) = item_def(iid) {
-                        *sprite_out = Some(idef.sprite.clone());
-                        for p in &idef.properties {
-                            if let Property::StatBonus {
-                                might: m_,
-                                reflexes: r_,
-                                wisdom: w_,
-                                hp: h_,
-                            } = p
-                            {
-                                might += m_;
-                                reflexes += r_;
-                                wisdom += w_;
-                                hp += h_;
-                            } else {
-                                props.push(p.clone());
-                            }
+                if let Some(idef) = slot_items.as_ref() {
+                    *id_out = Some(idef.id.clone());
+                    *sprite_out = Some(idef.sprite.clone());
+                    for p in &idef.properties {
+                        if let Property::StatBonus {
+                            might: m_,
+                            reflexes: r_,
+                            wisdom: w_,
+                            hp: h_,
+                        } = p
+                        {
+                            might += m_;
+                            reflexes += r_;
+                            wisdom += w_;
+                            hp += h_;
+                        } else {
+                            props.push(p.clone());
                         }
                     }
                 }
@@ -251,7 +247,7 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
             let (mana, max_mana) = healer_mana_from_props(&props);
             let uid = *uid_start;
             *uid_start += 1;
-            Some(Combatant {
+            Combatant {
                 uid,
                 def_id: def.id.clone(),
                 sprite: def.sprite.clone(),
@@ -286,8 +282,13 @@ fn build_team(build: &Build, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
                 per_ally_hp_bonus: 0,
                 mana,
                 max_mana,
-            })
-        })
+            }
+}
+
+fn build_side(team: &Team, side: u8, uid_start: &mut u32) -> Vec<Combatant> {
+    team.members()
+        .iter()
+        .map(|m| combatant_from_resolved(m, side, uid_start))
         .collect()
 }
 
@@ -599,11 +600,11 @@ fn first_damaged_idx(team: &[Combatant], excluding: u32) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-fn living_gold(team: &[Combatant]) -> i32 {
+fn living_gold(team: &[Combatant], defs: &DefsTable) -> i32 {
     team.iter()
         .filter(|c| c.hp > 0)
         .map(|c| {
-            let mut cost = character_def(&c.def_id).map(|d| d.cost).unwrap_or(0);
+            let mut cost = defs.unit(&c.def_id).map(|d| d.cost).unwrap_or(0);
             for item_id in [
                 &c.hat_id,
                 &c.left_hand_id,
@@ -614,7 +615,7 @@ fn living_gold(team: &[Combatant]) -> i32 {
                 .into_iter()
                 .flatten()
             {
-                cost += item_def(item_id).map(|d| d.cost).unwrap_or(0);
+                cost += defs.item(item_id).map(|d| d.cost).unwrap_or(0);
             }
             cost
         })
@@ -632,9 +633,10 @@ fn living_hp(team: &[Combatant]) -> i32 {
 fn lock_break_winner(
     left: &[Combatant],
     right: &[Combatant],
+    defs: &DefsTable,
 ) -> (Option<u8>, i32, i32, usize, usize, i32, i32) {
-    let left_gold = living_gold(left);
-    let right_gold = living_gold(right);
+    let left_gold = living_gold(left, defs);
+    let right_gold = living_gold(right, defs);
     let left_units = living_units(left);
     let right_units = living_units(right);
     let left_hp = living_hp(left);
@@ -660,6 +662,7 @@ fn lock_break_winner(
 }
 
 fn summon_on_enemy_death(
+    defs: &DefsTable,
     actors: &mut Vec<Combatant>,
     dead_def: &str,
     attacker_side: u8,
@@ -676,7 +679,7 @@ fn summon_on_enemy_death(
                 if dead_def != species.as_str()
                     && actors.iter().filter(|c| c.hp > 0).count() + summons.len() < MAX_TEAM
                 {
-                    if let Some(def) = character_def(species) {
+                    if let Some(def) = defs.unit(species) {
                         let uid = *uid_counter;
                         *uid_counter += 1;
                         let (mana, max_mana) = healer_mana_from_props(&def.properties);
@@ -739,6 +742,7 @@ fn summon_on_enemy_death(
 }
 
 fn summon_on_ally_death(
+    defs: &DefsTable,
     foes: &mut Vec<Combatant>,
     dead_def: &str,
     dead_side: u8,
@@ -755,7 +759,7 @@ fn summon_on_ally_death(
                 if dead_def != species.as_str()
                     && foes.iter().filter(|c| c.hp > 0).count() + ally_summons.len() < MAX_TEAM
                 {
-                    if let Some(def) = character_def(species) {
+                    if let Some(def) = defs.unit(species) {
                         let uid = *uid_counter;
                         *uid_counter += 1;
                         let (mana, max_mana) = healer_mana_from_props(&def.properties);
@@ -882,6 +886,7 @@ fn apply_flat_stat_damage_to_target(
 }
 
 fn handle_unit_dropped(
+    defs: &DefsTable,
     victims: &mut Vec<Combatant>,
     enemies: &mut Vec<Combatant>,
     victim_idx: usize,
@@ -903,6 +908,7 @@ fn handle_unit_dropped(
     apply_team_stats_on_death(victims, &dead_props, events);
     apply_kill_bonuses(enemies, killer_uid, events);
     apply_damage_enemy_on_death(
+        defs,
         enemies,
         victims,
         dead_uid,
@@ -912,11 +918,12 @@ fn handle_unit_dropped(
         events,
         uid_counter,
     );
-    summon_on_enemy_death(enemies, &dead_def, killer_side, events, uid_counter);
-    summon_on_ally_death(victims, &dead_def, dead_side, events, uid_counter);
+    summon_on_enemy_death(defs, enemies, &dead_def, killer_side, events, uid_counter);
+    summon_on_ally_death(defs, victims, &dead_def, dead_side, events, uid_counter);
 }
 
 fn resolve_dropped_unit(
+    defs: &DefsTable,
     victims: &mut Vec<Combatant>,
     enemies: &mut Vec<Combatant>,
     victim_idx: usize,
@@ -946,6 +953,7 @@ fn resolve_dropped_unit(
         hp: 0,
     });
     handle_unit_dropped(
+        defs,
         victims,
         enemies,
         victim_idx,
@@ -1106,6 +1114,7 @@ fn apply_team_stats_on_death(
 }
 
 fn apply_damage_enemy_on_death(
+    defs: &DefsTable,
     enemies: &mut Vec<Combatant>,
     allies: &mut Vec<Combatant>,
     source_uid: u32,
@@ -1141,6 +1150,7 @@ fn apply_damage_enemy_on_death(
     });
     enemies[target_idx].hp -= damage;
     resolve_dropped_unit(
+        defs,
         enemies,
         allies,
         target_idx,
@@ -1151,10 +1161,17 @@ fn apply_damage_enemy_on_death(
     );
 }
 
-pub fn resolve_battle(left_build: &Build, right_build: &Build, rng: &mut Rng) -> BattleResult {
+pub fn resolve_v1(
+    defs: &DefsTable,
+    left_team: &Team,
+    right_team: &Team,
+    rng: &mut Rng,
+) -> BattleResult {
+    debug_assert_eq!(defs.version(), left_team.version());
+    debug_assert_eq!(defs.version(), right_team.version());
     let mut uid_counter: u32 = 1;
-    let mut left = build_team(left_build, 0, &mut uid_counter);
-    let mut right = build_team(right_build, 1, &mut uid_counter);
+    let mut left = build_side(left_team, 0, &mut uid_counter);
+    let mut right = build_side(right_team, 1, &mut uid_counter);
     refresh_formation_front_aura(&mut left, None);
     refresh_formation_front_aura(&mut right, None);
     refresh_per_ally_aura(&mut left, None);
@@ -1361,6 +1378,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build, rng: &mut Rng) ->
                                 );
                             }
                             let dropped = resolve_dropped_unit(
+                                defs,
                                 foes,
                                 actors,
                                 foe_idx,
@@ -1418,7 +1436,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build, rng: &mut Rng) ->
             right_living_units,
             left_hp,
             right_hp,
-        ) = lock_break_winner(&left, &right);
+        ) = lock_break_winner(&left, &right, defs);
         winner = lock_winner;
         events.push(CombatEvent::LockBreaker {
             winner,
@@ -1437,6 +1455,7 @@ pub fn resolve_battle(left_build: &Build, right_build: &Build, rng: &mut Rng) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::defs::Defs;
 
     fn test_combatant(
         uid: u32,
@@ -1512,8 +1531,10 @@ mod tests {
         )];
         let mut events = vec![];
         let mut uid_counter = 10;
+        let table = Defs::load().current_table();
 
         resolve_dropped_unit(
+            &table,
             &mut victims,
             &mut enemies,
             0,
@@ -1554,8 +1575,10 @@ mod tests {
         let mut enemies = vec![test_combatant(2, "meme_man", 0, 60, 1, vec![])];
         let mut events = vec![];
         let mut uid_counter = 10;
+        let table = Defs::load().current_table();
 
         resolve_dropped_unit(
+            &table,
             &mut victims,
             &mut enemies,
             0,
@@ -1593,8 +1616,10 @@ mod tests {
         let mut enemies = vec![test_combatant(3, "meme_man", 0, 20, 1, vec![])];
         let mut events = vec![];
         let mut uid_counter = 10;
+        let table = Defs::load().current_table();
 
         resolve_dropped_unit(
+            &table,
             &mut victims,
             &mut enemies,
             0,

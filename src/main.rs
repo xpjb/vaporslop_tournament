@@ -14,8 +14,8 @@ use axum::{
     Json, Router,
 };
 use db::{AttachErr, BattleOutcome, Db};
-use game::combat::resolve_battle;
-use game::data::*;
+use game::combat::resolve_v1;
+use game::defs::{Defs, DefsVersion};
 use game::rng::Rng;
 use game::shop::{ai_ladder_build, roll_shop};
 use game::types::*;
@@ -32,6 +32,7 @@ const AUTH_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct AppState {
+    defs: Defs,
     db: Db,
     presence: Arc<Presence>,
     stats_tx: broadcast::Sender<SiteStats>,
@@ -225,7 +226,7 @@ enum ServerMsg {
         wins: i32,
         losses: i32,
         alive: bool,
-        /// Seed that drove `resolve_battle`. Persisted on the replay row.
+        /// Seed that drove `resolve_v1`. Persisted on the replay row.
         combat_seed: u32,
         /// Pool id of the enemy snapshot (`None` for synthetic AI). Persisted on the replay row.
         enemy_opponent_id: Option<i64>,
@@ -378,9 +379,11 @@ fn insufficient_reroll_msg(wallet: i32) -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let db = Db::open("vaporslop.sqlite")?;
+    let defs = Defs::load();
+    let db = Db::open("vaporslop.sqlite", &defs.current_table())?;
     let (stats_tx, _) = broadcast::channel::<SiteStats>(64);
     let state = Arc::new(AppState {
+        defs,
         db,
         presence: Arc::new(Presence::default()),
         stats_tx,
@@ -458,11 +461,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
     let mut evict_notify: Option<Arc<Notify>> = None;
     let mut rx = state.stats_tx.subscribe();
 
+    let live_defs = state.defs.current_table();
     send(
         &mut socket,
         &ServerMsg::Defs {
-            characters: character_defs().to_vec(),
-            items: item_defs().to_vec(),
+            characters: live_defs.sorted_characters(),
+            items: live_defs.sorted_items(),
             profile_avatars: profile_avatar_defs(),
             constants: Constants {
                 starting_money: STARTING_MONEY,
@@ -574,7 +578,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                             best_streak: 0,
                             mmr,
                             build: Build::default(),
-                            shop: roll_shop(&mut rng),
+                            shop: roll_shop(&state.defs.current_table(), &mut rng),
                             phase: Phase::Shop,
                         };
                         register_socket_player(&state, &mut registered_player, &mut evict_notify, &run.player_id);
@@ -717,7 +721,8 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                             }
                         };
                         let is_battle = matches!(&other, ClientMsg::Battle);
-                        let result = handle_run_action(&state, &mut run, other).await;
+                        let defs_table = state.defs.current_table();
+                        let result = handle_run_action(&state, &defs_table, &mut run, other).await;
                         match result {
                             Ok(mut extra) => {
                                 let save_result = if is_battle {
@@ -749,6 +754,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
                                         enemy_opponent_id,
                                         combat_seed,
                                         player_mmr_before,
+                                        &defs_table,
                                     )
                                 } else {
                                     state.db.upsert_player_state(&run).map(|_| None)
@@ -836,6 +842,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, session_pid:
 
 async fn handle_run_action(
     state: &AppState,
+    defs: &game::defs::DefsTable,
     run: &mut Run,
     msg: ClientMsg,
 ) -> Result<Option<ServerMsg>, String> {
@@ -850,7 +857,7 @@ async fn handle_run_action(
                 .get(slot)
                 .and_then(|s| s.clone())
                 .ok_or("slot empty")?;
-            let def = character_def(&id).ok_or("unknown char")?;
+            let def = defs.unit(&id).ok_or("unknown char")?;
             if run.money < def.cost {
                 return Err(insufficient_money_msg(def.cost, run.money));
             }
@@ -885,7 +892,7 @@ async fn handle_run_action(
                 .get(slot)
                 .and_then(|s| s.clone())
                 .ok_or("slot empty")?;
-            let def = item_def(&id).ok_or("unknown item")?;
+            let def = defs.item(&id).ok_or("unknown item")?;
             if run.money < def.cost {
                 return Err(insufficient_money_msg(def.cost, run.money));
             }
@@ -902,7 +909,7 @@ async fn handle_run_action(
                     member.hat = Some(id);
                 }
                 GearSlot::Hand => {
-                    let hand_count = character_def(&member.def_id)
+                    let hand_count = defs.unit(&member.def_id)
                         .map(|d| d.hand_slots())
                         .unwrap_or(2) as usize;
                     let target_slot = ItemSlot::HAND_SLOTS
@@ -934,7 +941,7 @@ async fn handle_run_action(
                 .get(slot)
                 .and_then(|s| s.clone())
                 .ok_or("slot empty")?;
-            let def = item_def(&id).ok_or("unknown item")?;
+            let def = defs.item(&id).ok_or("unknown item")?;
             if run.money < def.cost {
                 return Err(insufficient_money_msg(def.cost, run.money));
             }
@@ -946,7 +953,7 @@ async fn handle_run_action(
                 .team
                 .get_mut(target)
                 .ok_or("no such team member")?;
-            if !member_has_slot(member, target_slot) {
+            if !member_has_slot(defs, member, target_slot) {
                 return Err("character lacks that slot".into());
             }
             let dest = member_item_slot_mut(member, target_slot);
@@ -974,11 +981,11 @@ async fn handle_run_action(
                 .as_ref()
                 .cloned()
                 .ok_or("no item there")?;
-            let item_slot = item_def(&item_id).ok_or("unknown item")?.slot;
+            let item_slot = defs.item(&item_id).ok_or("unknown item")?.slot;
             if !slot_accepts(to_slot, item_slot) {
                 return Err("wrong item socket".into());
             }
-            if !member_has_slot(&run.build.team[to_team], to_slot) {
+            if !member_has_slot(defs, &run.build.team[to_team], to_slot) {
                 return Err("character lacks that slot".into());
             }
             if from_team == to_team && from_slot == to_slot {
@@ -988,7 +995,7 @@ async fn handle_run_action(
                 .as_ref()
                 .cloned();
             if let Some(swapped_item_id) = swapped_item_id.as_ref() {
-                let swapped_slot = item_def(swapped_item_id).ok_or("unknown item")?.slot;
+                let swapped_slot = defs.item(swapped_item_id).ok_or("unknown item")?.slot;
                 if !slot_accepts(from_slot, swapped_slot) {
                     return Err("wrong item socket".into());
                 }
@@ -1002,9 +1009,9 @@ async fn handle_run_action(
                 return Err("not in shop".into());
             }
             let m = run.build.team.get(team_index).ok_or("no such")?;
-            let mut refund = character_def(&m.def_id).map(|d| d.cost).unwrap_or(0);
+            let mut refund = defs.unit(&m.def_id).map(|d| d.cost).unwrap_or(0);
             for iid in m.item_ids() {
-                refund += item_def(iid).map(|d| d.cost).unwrap_or(0);
+                refund += defs.item(iid).map(|d| d.cost).unwrap_or(0);
             }
             run.money += (refund as f32 * SELL_RATIO) as i32;
             run.build.team.remove(team_index);
@@ -1020,7 +1027,7 @@ async fn handle_run_action(
             let member = run.build.team.get_mut(team_index).ok_or("no such")?;
             let slot = member_item_slot_mut(member, item_slot);
             let item_id = slot.take().ok_or("no item there")?;
-            let refund = item_def(&item_id).map(|d| d.cost).unwrap_or(0);
+            let refund = defs.item(&item_id).map(|d| d.cost).unwrap_or(0);
             run.money += (refund as f32 * SELL_RATIO) as i32;
             Ok(None)
         }
@@ -1040,7 +1047,7 @@ async fn handle_run_action(
                 return Err(insufficient_reroll_msg(run.money));
             }
             run.money -= REROLL_COST;
-            run.shop = roll_shop(&mut Rng::new_random());
+            run.shop = roll_shop(defs, &mut Rng::new_random());
             Ok(None)
         }
         ClientMsg::Battle => {
@@ -1085,15 +1092,21 @@ async fn handle_run_action(
                     }
                     None => (
                         synthetic_opponent_name(&mut mm_rng),
-                        ai_ladder_build(target_gold.max(50), &mut mm_rng),
+                        ai_ladder_build(defs, target_gold.max(50), &mut mm_rng),
                         None,
                         DEFAULT_PROFILE_AVATAR.to_string(),
                         None,
                     ),
                 };
             let combat_seed: u32 = Rng::new_random().next_u32();
+            let player_team = defs
+                .resolve(&run.build)
+                .ok_or_else(|| "unable to materialize team".to_string())?;
+            let enemy_team = defs
+                .resolve(&op_build_raw)
+                .ok_or_else(|| "opponent build invalid".to_string())?;
             let mut combat_rng = Rng::new(combat_seed);
-            let res = resolve_battle(&run.build, &op_build_raw, &mut combat_rng);
+            let res = resolve_v1(defs, &player_team, &enemy_team, &mut combat_rng);
             if let Some(opponent_mmr) = opponent_mmr_before {
                 run.mmr = updated_mmr(player_mmr_before, opponent_mmr, battle_score(res.winner));
             }
@@ -1113,7 +1126,7 @@ async fn handle_run_action(
                 run.phase = Phase::GameOver;
             } else {
                 run.phase = Phase::Shop;
-                run.shop = roll_shop(&mut mm_rng);
+                run.shop = roll_shop(defs, &mut mm_rng);
             }
             Ok(Some(ServerMsg::Battle {
                 run_id: run.id.clone(),
@@ -1280,8 +1293,8 @@ fn slot_accepts(target: ItemSlot, item: GearSlot) -> bool {
     }
 }
 
-fn member_has_slot(member: &TeamMember, slot: ItemSlot) -> bool {
-    let hand_count = character_def(&member.def_id)
+fn member_has_slot(defs: &game::defs::DefsTable, member: &TeamMember, slot: ItemSlot) -> bool {
+    let hand_count = defs.unit(&member.def_id)
         .map(|d| d.hand_slots())
         .unwrap_or(2);
     match slot {
@@ -1400,14 +1413,28 @@ async fn replay_handler(
         .ok()
         .flatten()
         .unwrap_or_else(|| DEFAULT_PROFILE_AVATAR.to_string());
-    let mut combat_rng = Rng::new(replay.combat_seed);
-    let battle = resolve_battle(&replay.player_build, &replay.enemy_build, &mut combat_rng);
     let recorded_winner = match replay.outcome {
         BattleOutcome::Win => Some(0),
         BattleOutcome::Loss => Some(1),
         BattleOutcome::Draw => None,
     };
-    let version_mismatch = replay.version_hash != game::VERSION_HASH;
+    let version_mismatch = replay.version_hash != state.defs.current_version().0;
+    let replay_ver = DefsVersion(replay.version_hash);
+    let (events, winner) = match state.defs.table_at(replay_ver) {
+        None => (vec![], recorded_winner),
+        Some(table) => match (
+            table.resolve(&replay.player_build),
+            table.resolve(&replay.enemy_build),
+        ) {
+            (Some(player_team), Some(enemy_team)) => {
+                let mut combat_rng = Rng::new(replay.combat_seed);
+                let battle =
+                    resolve_v1(&table, &player_team, &enemy_team, &mut combat_rng);
+                (battle.events, battle.winner)
+            }
+            _ => (vec![], recorded_winner),
+        },
+    };
     Json(ReplayPayload {
         replay_id: replay.id,
         player_name,
@@ -1416,12 +1443,8 @@ async fn replay_handler(
         opponent_avatar,
         player_mmr_before: replay.player_mmr_before,
         opponent_mmr_before: replay.enemy_mmr_before,
-        events: battle.events,
-        winner: if version_mismatch {
-            recorded_winner
-        } else {
-            battle.winner
-        },
+        events,
+        winner,
         created_at: replay.created_at,
         version_mismatch,
     })

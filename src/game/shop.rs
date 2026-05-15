@@ -1,10 +1,10 @@
-use crate::game::data::*;
+use crate::game::defs::DefsTable;
 use crate::game::rng::Rng;
 use crate::game::types::*;
 
-pub fn roll_shop(rng: &mut Rng) -> Shop {
-    let chars: Vec<String> = character_defs().iter().map(|c| c.id.clone()).collect();
-    let items: Vec<String> = item_defs().iter().map(|i| i.id.clone()).collect();
+pub fn roll_shop(defs: &DefsTable, rng: &mut Rng) -> Shop {
+    let chars: Vec<String> = defs.sorted_characters().into_iter().map(|c| c.id).collect();
+    let items: Vec<String> = defs.sorted_items().into_iter().map(|i| i.id).collect();
     let mut shop = Shop::default();
     for _ in 0..SHOP_CHAR_SLOTS {
         shop.characters.push(rng.choice(&chars).cloned());
@@ -16,23 +16,22 @@ pub fn roll_shop(rng: &mut Rng) -> Shop {
 }
 
 /// Generate an AI build for a target gold budget using light combat heuristics.
-pub fn ai_ladder_build(target_cost: i32, rng: &mut Rng) -> Build {
+pub fn ai_ladder_build(defs: &DefsTable, target_cost: i32, rng: &mut Rng) -> Build {
     let mut spent = 0;
     let mut team: Vec<TeamMember> = vec![];
-    let chars: Vec<&CharacterDef> = character_defs().iter().collect();
+    let chars: Vec<CharacterDef> = defs.sorted_characters();
 
     while team.len() < MAX_TEAM && spent < target_cost {
         let remaining = target_cost - spent;
         let affordable: Vec<&CharacterDef> = chars
             .iter()
-            .copied()
             .filter(|c| c.cost <= remaining)
             .collect();
         if affordable.is_empty() {
             break;
         }
 
-        let needs_front = !team.iter().any(is_frontline_member);
+        let needs_front = !team.iter().any(|m| is_frontline_member(defs, m));
         let prefer_backline = !needs_front && rng.chance(0.65);
         let mut pool: Vec<&CharacterDef> = affordable
             .iter()
@@ -72,28 +71,38 @@ pub fn ai_ladder_build(target_cost: i32, rng: &mut Rng) -> Build {
         });
     }
 
-    arrange_ai_team(&mut team);
-    equip_ai_items(&mut team, target_cost - spent, rng);
-    arrange_ai_team(&mut team);
+    arrange_ai_team(defs, &mut team);
+    equip_ai_items(defs, &mut team, target_cost - spent, rng);
+    arrange_ai_team(defs, &mut team);
 
     Build { team }
 }
 
-fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut Rng) {
+fn equip_ai_items(
+    defs: &DefsTable,
+    team: &mut [TeamMember],
+    mut remaining: i32,
+    rng: &mut Rng,
+) {
     if remaining <= 0 {
         return;
     }
 
     loop {
-        let mut candidates: Vec<(usize, &ItemDef, i32)> = vec![];
+        let mut candidates: Vec<(usize, ItemDef, i32)> = vec![];
+        let items = defs.sorted_items();
         for (member_idx, member) in team.iter().enumerate() {
-            let Some(def) = character_def(&member.def_id) else {
+            let Some(def) = defs.unit(&member.def_id) else {
                 continue;
             };
             let wants_wisdom = is_backline_def(def);
-            for item in item_defs().iter() {
-                if item.cost <= remaining && can_equip_item(member, item) {
-                    candidates.push((member_idx, item, item_fit_score(item, wants_wisdom)));
+            for item in items.iter() {
+                if item.cost <= remaining && can_equip_item(defs, member, item) {
+                    candidates.push((
+                        member_idx,
+                        item.clone(),
+                        item_fit_score(item, wants_wisdom),
+                    ));
                 }
             }
         }
@@ -105,24 +114,24 @@ fn equip_ai_items(team: &mut [TeamMember], mut remaining: i32, rng: &mut Rng) {
         candidates.sort_by_key(|(_, item, score)| (*score, item.cost));
         candidates.reverse();
         let pick_pool_len = candidates.len().min(3);
-        let (member_idx, item, _) = rng.choice(&candidates[..pick_pool_len]).copied().unwrap();
-        equip_item(&mut team[member_idx], item);
+        let (member_idx, item, _) = rng.choice(&candidates[..pick_pool_len]).cloned().unwrap();
         remaining -= item.cost;
+        equip_item(defs, &mut team[member_idx], &item);
     }
 }
 
-fn can_equip_item(member: &TeamMember, item: &ItemDef) -> bool {
+fn can_equip_item(defs: &DefsTable, member: &TeamMember, item: &ItemDef) -> bool {
     match item.slot {
         GearSlot::Hat => member.hat.is_none(),
-        GearSlot::Hand => member_hand_slot_count(member) > member_filled_hands(member),
+        GearSlot::Hand => member_hand_slot_count(defs, member) > member_filled_hands(member),
     }
 }
 
-fn equip_item(member: &mut TeamMember, item: &ItemDef) {
+fn equip_item(defs: &DefsTable, member: &mut TeamMember, item: &ItemDef) {
     match item.slot {
         GearSlot::Hat => member.hat = Some(item.id.clone()),
         GearSlot::Hand => {
-            let limit = member_hand_slot_count(member);
+            let limit = member_hand_slot_count(defs, member);
             for slot in ItemSlot::HAND_SLOTS.iter().take(limit as usize) {
                 let dest = member.hand_slot_mut(*slot);
                 if dest.is_none() {
@@ -134,8 +143,8 @@ fn equip_item(member: &mut TeamMember, item: &ItemDef) {
     }
 }
 
-fn member_hand_slot_count(member: &TeamMember) -> u8 {
-    character_def(&member.def_id)
+fn member_hand_slot_count(defs: &DefsTable, member: &TeamMember) -> u8 {
+    defs.unit(&member.def_id)
         .map(|d| d.hand_slots())
         .unwrap_or(2)
 }
@@ -147,9 +156,9 @@ fn member_filled_hands(member: &TeamMember) -> u8 {
         .count() as u8
 }
 
-fn arrange_ai_team(team: &mut [TeamMember]) {
+fn arrange_ai_team(defs: &DefsTable, team: &mut [TeamMember]) {
     team.sort_by_key(|m| {
-        let Some(def) = character_def(&m.def_id) else {
+        let Some(def) = defs.unit(&m.def_id) else {
             return 0;
         };
         if is_frontline_def(def) {
@@ -161,8 +170,8 @@ fn arrange_ai_team(team: &mut [TeamMember]) {
     team.reverse();
 }
 
-fn is_frontline_member(member: &TeamMember) -> bool {
-    character_def(&member.def_id)
+fn is_frontline_member(defs: &DefsTable, member: &TeamMember) -> bool {
+    defs.unit(&member.def_id)
         .map(is_frontline_def)
         .unwrap_or(false)
 }
@@ -213,20 +222,22 @@ fn item_fit_score(item: &ItemDef, wants_wisdom: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::defs::Defs;
 
     #[test]
     fn ai_ladder_build_puts_backline_behind_frontline() {
+        let defs = Defs::load().current_table();
         for i in 0..25 {
             let mut rng = Rng::new(0xA1B2_C3D4 ^ i as u32);
-            let build = ai_ladder_build(700, &mut rng);
+            let build = ai_ladder_build(&defs, 700, &mut rng);
             assert!(!build.team.is_empty());
 
             let first_backline = build.team.iter().position(|m| {
-                character_def(&m.def_id)
+                defs.unit(&m.def_id)
                     .map(is_backline_def)
                     .unwrap_or(false)
             });
-            let last_frontline = build.team.iter().rposition(is_frontline_member);
+            let last_frontline = build.team.iter().rposition(|m| is_frontline_member(&defs, m));
 
             if let (Some(first_backline), Some(last_frontline)) = (first_backline, last_frontline) {
                 assert!(last_frontline < first_backline);

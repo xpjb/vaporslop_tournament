@@ -1,8 +1,7 @@
 use crate::game::types::*;
-use std::sync::OnceLock;
-
 // Filenames match the actual webp assets in /assets (case-sensitive on some hosts).
-fn build_character_defs() -> Vec<CharacterDef> {
+
+pub(super) fn build_character_defs() -> Vec<CharacterDef> {
     use Property::*;
     vec![
         CharacterDef {
@@ -180,7 +179,8 @@ fn build_character_defs() -> Vec<CharacterDef> {
 }
 
 //@item -- when items are added, expand here. Keep ids stable.
-fn build_item_defs() -> Vec<ItemDef> {
+
+pub(super) fn build_item_defs() -> Vec<ItemDef> {
     vec![
         ItemDef {
             id: "steve_hat".into(),
@@ -422,20 +422,4 @@ fn build_item_defs() -> Vec<ItemDef> {
             properties: vec![Property::DrainEnemyStatsOnHit { amount: 1 }],
         },
     ]
-}
-
-static CHARACTER_DEFS: OnceLock<Vec<CharacterDef>> = OnceLock::new();
-static ITEM_DEFS: OnceLock<Vec<ItemDef>> = OnceLock::new();
-
-pub fn character_defs() -> &'static [CharacterDef] {
-    CHARACTER_DEFS.get_or_init(build_character_defs)
-}
-pub fn item_defs() -> &'static [ItemDef] {
-    ITEM_DEFS.get_or_init(build_item_defs)
-}
-pub fn character_def(id: &str) -> Option<&'static CharacterDef> {
-    character_defs().iter().find(|c| c.id == id)
-}
-pub fn item_def(id: &str) -> Option<&'static ItemDef> {
-    item_defs().iter().find(|i| i.id == id)
 }

@@ -1,3 +1,4 @@
+use crate::game::defs::{Defs, DefsTable};
 use crate::game::rng::Rng;
 use crate::game::types::*;
 use anyhow::Result;
@@ -66,6 +67,8 @@ pub struct ReplayRecord {
     pub player_mmr_before: i32,
     pub enemy_mmr_before: i32,
     pub combat_seed: u32,
+    /// Which [`crate::game::defs::DefsVersion`] (numeric) produced this replay. Persists under
+    /// the legacy SQLite column name `version_hash`.
     pub version_hash: u32,
     pub outcome: BattleOutcome,
     pub created_at: i64,
@@ -90,7 +93,7 @@ pub struct ReplaySummary {
 }
 
 impl Db {
-    pub fn open(path: &str) -> Result<Self> {
+    pub fn open(path: &str, defs: &DefsTable) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             r#"
@@ -428,7 +431,7 @@ impl Db {
              WHERE last_battle_at > 0",
             [],
         )?;
-        recompute_opponent_costs(&conn)?;
+        recompute_opponent_costs(&conn, defs)?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -695,7 +698,7 @@ impl Db {
     ///
     /// `enemy_opponent_id` is `None` for synthetic AI battles; in that case no replay row
     /// is written (we don't snapshot bot builds into `opponents`).
-    /// `combat_seed` is the seed that drove `resolve_battle`, needed for byte-for-byte replay.
+    /// `combat_seed` is the seed that drove combat `resolve_v1`, needed for byte-for-byte replay.
     /// `player_mmr_before` is the player's MMR going into this battle (pre-update).
     pub fn record_battle_and_save_state(
         &self,
@@ -706,6 +709,7 @@ impl Db {
         enemy_opponent_id: Option<i64>,
         combat_seed: u32,
         player_mmr_before: i32,
+        defs: &DefsTable,
     ) -> Result<Option<i64>> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
@@ -720,7 +724,7 @@ impl Db {
             completed_ultimate_victory,
         )?;
         upsert_player_state_on(&tx, run)?;
-        let player_opponent_id = insert_opponent_on(&tx, run)?;
+        let player_opponent_id = insert_opponent_on(&tx, run, defs)?;
         let mut replay_id = None;
         if let (Some(player_id), Some(enemy_id)) = (player_opponent_id, enemy_opponent_id) {
             replay_id = Some(insert_battle_on(
@@ -728,6 +732,7 @@ impl Db {
                 player_id,
                 enemy_id,
                 combat_seed,
+                defs,
                 result,
                 player_mmr_before,
             )?);
@@ -959,9 +964,9 @@ impl Db {
     }
 
     #[cfg(test)]
-    pub fn insert_opponent(&self, run: &Run) -> Result<Option<i64>> {
+    pub fn insert_opponent(&self, run: &Run, defs: &DefsTable) -> Result<Option<i64>> {
         let conn = self.conn.lock();
-        insert_opponent_on(&conn, run)
+        insert_opponent_on(&conn, run, defs)
     }
 
     /// Paginated leaderboard view. Only includes players who have battled
@@ -1127,7 +1132,7 @@ fn record_profile_progress_on(
 
 /// Walk every `opponents` row and refresh `cost_value` against current item/character defs.
 /// Run once at startup so price changes in code propagate to the matchmaking index.
-fn recompute_opponent_costs(conn: &Connection) -> Result<()> {
+fn recompute_opponent_costs(conn: &Connection, defs: &DefsTable) -> Result<()> {
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM opponents", [], |r| r.get(0))?;
     tracing::info!("recompute_opponent_costs: starting; opponents={}", total);
 
@@ -1142,7 +1147,7 @@ fn recompute_opponent_costs(conn: &Connection) -> Result<()> {
             let old_cost: i32 = row.get(2)?;
             match serde_json::from_str::<Build>(&bjson) {
                 Ok(build) => {
-                    let new_cost = build.cost_value();
+                    let new_cost = build.cost_value(defs);
                     if new_cost != old_cost {
                         updates.push((id, old_cost, new_cost));
                     }
@@ -1234,8 +1239,8 @@ fn load_player_state_on(conn: &Connection, player_id: &str) -> Result<Option<Run
 /// Publish the player's post-battle build snapshot into the matchmaking pool.
 /// Returns the new opponent row id, or `None` if the build was empty (cost == 0) — empty
 /// teams must never be matchable and never participate in replay history.
-fn insert_opponent_on(conn: &Connection, run: &Run) -> Result<Option<i64>> {
-    let cost = run.build.cost_value();
+fn insert_opponent_on(conn: &Connection, run: &Run, defs: &DefsTable) -> Result<Option<i64>> {
+    let cost = run.build.cost_value(defs);
     if cost <= 0 {
         return Ok(None);
     }
@@ -1259,6 +1264,7 @@ fn insert_battle_on(
     player_opponent_id: i64,
     enemy_opponent_id: i64,
     combat_seed: u32,
+    defs: &DefsTable,
     outcome: BattleOutcome,
     player_mmr_before: i32,
 ) -> Result<i64> {
@@ -1270,7 +1276,7 @@ fn insert_battle_on(
             player_opponent_id,
             enemy_opponent_id,
             combat_seed,
-            crate::game::VERSION_HASH,
+            defs.version().0,
             outcome.as_str(),
             player_mmr_before,
         ],
@@ -1283,8 +1289,13 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn test_defs() -> DefsTable {
+        Defs::load().current_table()
+    }
+
     fn test_db() -> Db {
-        Db::open(":memory:").unwrap()
+        let defs = test_defs();
+        Db::open(":memory:", &defs).expect("open memory db")
     }
 
     fn test_db_path(name: &str) -> String {
@@ -1368,19 +1379,19 @@ mod tests {
 
         // Caller publishes a snapshot, but searching as them must skip it.
         let mine = run_with_build("player-1", "me", one_member_build("orang"));
-        db.insert_opponent(&mine).unwrap();
+        db.insert_opponent(&mine, &test_defs()).unwrap();
 
         let mut rng = Rng::new(1);
         assert!(db
-            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
+            .find_opponent("player-1", mine.build.cost_value(&test_defs()), &mut rng)
             .unwrap()
             .is_none());
 
         let other = run_with_build("player-2", "rival", one_member_build("meme_man"));
-        db.insert_opponent(&other).unwrap();
+        db.insert_opponent(&other, &test_defs()).unwrap();
 
         let found = db
-            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
+            .find_opponent("player-1", mine.build.cost_value(&test_defs()), &mut rng)
             .unwrap()
             .unwrap();
         assert_eq!(found.1, "player-2"); // player_id
@@ -1393,7 +1404,7 @@ mod tests {
         let mine = run_with_build("player-1", "me", one_member_build("orang"));
         let mut rng = Rng::new(1);
         assert!(db
-            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
+            .find_opponent("player-1", mine.build.cost_value(&test_defs()), &mut rng)
             .unwrap()
             .is_none());
     }
@@ -1403,11 +1414,11 @@ mod tests {
         let db = test_db();
         let mine = run_with_build("player-1", "me", one_member_build("orang"));
         let far = run_with_build("player-2", "far", three_member_build());
-        db.insert_opponent(&far).unwrap();
+        db.insert_opponent(&far, &test_defs()).unwrap();
         // far's cost is much higher than mine's — out of band.
         let mut rng = Rng::new(1);
         assert!(db
-            .find_opponent("player-1", mine.build.cost_value(), &mut rng)
+            .find_opponent("player-1", mine.build.cost_value(&test_defs()), &mut rng)
             .unwrap()
             .is_none());
     }
@@ -1418,12 +1429,12 @@ mod tests {
         // at their original cost.
         let db = test_db();
         let mut hero = run_with_build("hero", "hero", one_member_build("orang"));
-        db.insert_opponent(&hero).unwrap();
+        db.insert_opponent(&hero, &test_defs()).unwrap();
         // Player's *current* state changes drastically; this should not affect matchmaking.
         hero.build = three_member_build();
         db.upsert_player_state(&hero).unwrap();
 
-        let target = one_member_build("orang").cost_value();
+        let target = one_member_build("orang").cost_value(&test_defs());
         let mut rng = Rng::new(1);
         let found = db.find_opponent("seeker", target, &mut rng).unwrap();
         assert!(found.is_some(), "expected to match the historical snapshot");
@@ -1452,7 +1463,7 @@ mod tests {
         run.wins = 1;
         run.best_streak = 1;
         let replay_id = db
-            .record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr)
+            .record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr, &test_defs())
             .unwrap();
         assert_eq!(replay_id, None);
         let conn = db.conn.lock();
@@ -1472,7 +1483,7 @@ mod tests {
         // row that references both opponent ids.
         let db = test_db();
         let enemy = run_with_build("enemy", "enemy", one_member_build("meme_man"));
-        let enemy_opponent_id = db.insert_opponent(&enemy).unwrap().unwrap();
+        let enemy_opponent_id = db.insert_opponent(&enemy, &test_defs()).unwrap().unwrap();
 
         let mut me = run_with_build("me", "me", one_member_build("orang"));
         me.wins = 1;
@@ -1488,6 +1499,7 @@ mod tests {
                 Some(enemy_opponent_id),
                 combat_seed,
                 player_mmr_before,
+                &test_defs(),
             )
             .unwrap()
             .expect("real opponent battle should create replay row");
@@ -1515,7 +1527,8 @@ mod tests {
         assert_eq!(seed, combat_seed);
         assert_eq!(outcome, "win");
         assert_eq!(mmr_before, player_mmr_before);
-        assert_eq!(version, crate::game::VERSION_HASH);
+        let expect_v = Defs::load().current_version().0;
+        assert_eq!(version, expect_v);
         assert_eq!(e_op, enemy_opponent_id);
         assert_ne!(p_op, enemy_opponent_id); // player's snapshot is a fresh row
 
@@ -1526,7 +1539,7 @@ mod tests {
         assert_eq!(replay.player_mmr_before, player_mmr_before);
         assert_eq!(replay.enemy_mmr_before, enemy.mmr);
         assert_eq!(replay.combat_seed, combat_seed);
-        assert_eq!(replay.version_hash, crate::game::VERSION_HASH);
+        assert_eq!(replay.version_hash, Defs::load().current_version().0);
         assert_eq!(replay.outcome.as_str(), "win");
         assert_eq!(replay.player_build.team.len(), 1);
         assert_eq!(replay.enemy_build.team.len(), 1);
@@ -1631,14 +1644,14 @@ mod tests {
         let mut run = run_with_build("player-1", "winner", one_member_build("orang"));
         run.wins = 12;
 
-        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr)
+        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr, &test_defs())
             .unwrap();
         let profile = db.ensure_player_profile("player-1", "winner").unwrap();
         assert_eq!(profile.best_wins, 12);
         assert_eq!(profile.ultimate_victories, 0);
 
         run.wins = MAX_WINS;
-        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, true, None, 0, run.mmr)
+        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, true, None, 0, run.mmr, &test_defs())
             .unwrap();
         let profile = db.ensure_player_profile("player-1", "winner").unwrap();
         assert_eq!(profile.best_wins, MAX_WINS);
@@ -1654,15 +1667,17 @@ mod tests {
         run.mmr = 1234;
         run.shop = Shop {
             characters: vec![Some("orang".to_string()), None],
-            items: vec![Some("sword".to_string())],
+            items: vec![Some("bread".to_string())],
         };
 
         {
-            let db = Db::open(&path).unwrap();
+            let table = test_defs();
+            let db = Db::open(&path, &table).unwrap();
             db.upsert_player_state(&run).unwrap();
         }
 
-        let db = Db::open(&path).unwrap();
+        let table = test_defs();
+        let db = Db::open(&path, &table).unwrap();
         let loaded = db.load_player_state("player-1").unwrap().unwrap();
         assert_eq!(loaded.id, run.id);
         assert_eq!(loaded.player_id, "player-1");
@@ -1682,7 +1697,8 @@ mod tests {
         // state is what v6 expects: user_version=6, opponents has rows preserved, battles
         // (replay log) exists and is empty.
         let path = std::env::var("MIGRATION_DB").expect("set MIGRATION_DB");
-        let db = Db::open(&path).unwrap();
+        let table = Defs::load().current_table();
+        let db = Db::open(&path, &table).unwrap();
         let conn = db.conn.lock();
 
         let ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
@@ -1771,7 +1787,7 @@ mod tests {
         run.money = 200;
         run.phase = Phase::Shop;
 
-        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr)
+        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr, &test_defs())
             .unwrap();
 
         let loaded = db.load_player_state("player-1").unwrap().unwrap();
@@ -1807,12 +1823,12 @@ mod tests {
         run.best_streak = 1;
         run.mmr = 1100;
 
-        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr)
+        db.record_battle_and_save_state(&run, BattleOutcome::Win, true, false, None, 0, run.mmr, &test_defs())
             .unwrap();
         run.wins = 2;
         run.best_streak = 2;
         run.mmr = 1300;
-        db.record_battle_and_save_state(&run, BattleOutcome::Win, false, false, None, 0, run.mmr)
+        db.record_battle_and_save_state(&run, BattleOutcome::Win, false, false, None, 0, run.mmr, &test_defs())
             .unwrap();
 
         let loaded = db.load_player_state("player-1").unwrap().unwrap();
@@ -1829,5 +1845,46 @@ mod tests {
                 "meme_man".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn opponent_pool_reads_at_current_version() {
+        let path = test_db_path("opp-cost-bump");
+        let base = test_defs();
+        let (mut units, items) = base.clone_maps();
+
+        let orang_cheap = units.get("orang").expect("orang fixture").clone();
+        let mut orang_pricier = orang_cheap.clone();
+        orang_pricier.cost += 801;
+
+        units.insert("orang".into(), orang_cheap.clone());
+        let cheap_table = DefsTable::from_maps(base.version(), units.clone(), items.clone());
+        let run = run_with_build("seller", "seller", one_member_build("orang"));
+        let opp_id = {
+            let db = Db::open(&path, &cheap_table).unwrap();
+            db.insert_opponent(&run, &cheap_table).unwrap().unwrap()
+        };
+        let cost_at_write = run.build.cost_value(&cheap_table);
+
+        units.insert("orang".into(), orang_pricier);
+        let pricy_table = DefsTable::from_maps(base.version(), units, items);
+
+        drop(Db::open(&path, &pricy_table).unwrap());
+
+        let db = Db::open(&path, &pricy_table).unwrap();
+        let refreshed: i32 = db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT cost_value FROM opponents WHERE id=?1",
+                [opp_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(db);
+
+        assert_eq!(refreshed, run.build.cost_value(&pricy_table));
+        assert_ne!(refreshed, cost_at_write);
+        cleanup_db_path(&path);
     }
 }
